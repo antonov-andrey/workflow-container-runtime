@@ -16,3 +16,8 @@ Concrete workflow-container projects import this package at runtime. This packag
 Generic prompt partials live in this package under `workflow_container_runtime/prompt/template/`. Concrete workflow-container prompts may include them through the `runtime/` template prefix.
 
 Concrete workflow-container projects own their full domain prompt templates and domain prompt partials. They must not keep local copies of runtime-owned generic partials.
+
+## Codex Browser Stage Boundary
+Browser-stage system prompts and runtime prompt partials must require Codex internal web search for search queries. Playwright MCP browser tools must not open public search-engine result pages. Browser tools are reserved for target source pages selected from internal search results, site navigation, saved evidence, or prompt context.
+
+The runtime owns this generic source-access rule but does not own domain result schemas. Concrete workflow-container projects that open target URLs must expose browser and network failures in their own schema-valid stage results, using a URL plus error contract such as `browsing_error_list`.

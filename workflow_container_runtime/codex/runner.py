@@ -15,9 +15,13 @@ from workflow_container_runtime.codex.schema import codex_output_schema_get
 
 CODEX_BROWSER_STAGE_SYSTEM_PROMPT = (
     "You are a Codex browser workflow stage inside {workflow_container_name}. "
-    "Use the configured browser tools for every source-page and source-data load. "
-    "All non-browser loading mechanisms are forbidden for source data; curl, requests, wget, and direct HTTP are "
-    "examples, not an exhaustive list. "
+    "Use Codex internal web search for search queries. "
+    "Do not use browser tools or Playwright MCP to open public search-engine result pages. "
+    "Use the configured browser tools only for target source pages selected from internal search results, site "
+    "navigation, saved evidence, or prompt context. "
+    "All target source-page and source-data loading must go through the configured browser. "
+    "All non-browser loading mechanisms are forbidden for target source data; curl, requests, wget, and direct HTTP "
+    "are examples, not an exhaustive list. "
     "Do not open local result artifacts through browser tools; file://, localhost, or 127.0.0.1 URLs for local "
     "artifacts are forbidden. "
     "Read local artifact files through normal filesystem access. "

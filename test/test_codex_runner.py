@@ -192,6 +192,62 @@ def test_system_prompt_uses_runtime_project_name_parameter(
     assert "concrete-domain-container" not in captured_prompt_list[0]
 
 
+def test_browser_stage_system_prompt_forbids_browser_search_engine_pages(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Require internal Codex search and reserve browser tools for target source pages."""
+    captured_prompt_list: list[str] = []
+
+    def fake_subprocess_run(
+        runner: object,
+        command: list[str],
+        *,
+        browser_artifact_activity: bool,
+        input: str,
+        result_dir: Path,
+        stage_dir: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        """Capture browser prompt and write schema-valid output.
+
+        Args:
+            runner: Runner instance.
+            command: Codex command argv.
+            browser_artifact_activity: Whether browser artifacts count as activity.
+            input: Prompt text.
+            result_dir: Result root.
+            stage_dir: Stage artifact directory.
+
+        Returns:
+            Successful process result.
+        """
+        _ = runner
+        _ = browser_artifact_activity
+        _ = result_dir
+        _ = stage_dir
+        captured_prompt_list.append(input)
+        output_path = Path(command[command.index("--output-last-message") + 1])
+        output_path.write_text(StageResult(message="ok", status="success").model_dump_json(), encoding="utf-8")
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(CodexStageRunner, "_subprocess_run", fake_subprocess_run)
+
+    codex_stage_run(
+        allow_user_config=True,
+        browser_runtime_mcp_url="http://127.0.0.1:8931/mcp",
+        model_class=StageResult,
+        prompt_text="Run browser task.",
+        result_dir=tmp_path,
+        stage_dir=tmp_path / "stage",
+        stage_name="source_discover",
+    )
+
+    assert "Use Codex internal web search for search queries." in captured_prompt_list[0]
+    assert "Do not use browser tools or Playwright MCP to open public search-engine result pages." in (
+        captured_prompt_list[0]
+    )
+
+
 def test_strict_schema_rejects_extra_output_fields(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Validate Codex output through the supplied Pydantic model."""
 
