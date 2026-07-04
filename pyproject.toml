@@ -15,6 +15,10 @@ dependencies = [
 [tool.pytest.ini_options]
 testpaths = ["test"]
 
+[tool.black]
+target-version = ["py314"]
+line-length = 120
+
 [tool.setuptools.packages.find]
 include = ["workflow_container_runtime*"]
 where = ["."]

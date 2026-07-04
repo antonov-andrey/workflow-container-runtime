@@ -7,6 +7,8 @@ The runtime owns `Codex` subprocess execution, structured JSON output schema han
 
 The runtime does not own `DBOS` workflow orchestration, domain schemas, domain validators, source-type behavior, domain extraction logic, browser/VPN process launch, OpenVPN, Playwright MCP server startup, or developer CLI tooling.
 
+Shared workflow-container ecosystem authoring and code quality rules live in the `workflow-container-developer` plugin reference `references/workflow-container-authoring.md`; this document owns only runtime-specific boundaries.
+
 ## Dependency Boundary
 Concrete workflow-container projects import this package at runtime. This package must not import concrete workflow-container projects, `workflow-container-developer`, or domain workflow code.
 
