@@ -7,8 +7,9 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel, ConfigDict
 
+import workflow_container_runtime.codex as codex
 from workflow_container_runtime.codex import runner as codex_runner
-from workflow_container_runtime.codex.runner import CodexStageError, CodexStageRunner, codex_stage_run
+from workflow_container_runtime.codex.runner import CodexStageError, CodexStageRunner
 
 
 class StageResult(BaseModel):
@@ -18,6 +19,32 @@ class StageResult(BaseModel):
 
     message: str
     status: str
+
+
+def test_codex_stage_run_function_is_absent() -> None:
+    """Expose Codex execution through `CodexStageRunner` instead of a function proxy."""
+
+    runner_source_text = Path(codex_runner.__file__).read_text(encoding="utf-8")
+
+    assert "def codex_stage_run(" not in runner_source_text
+    assert "codex_stage_run" not in codex_runner.__all__
+
+
+def test_schema_strict_normalizer_is_private() -> None:
+    """Expose only the structured-output schema builder."""
+
+    assert "schema_strict_normalize" not in codex.__all__
+    assert not hasattr(codex, "schema_strict_normalize")
+
+
+def test_codex_runner_loads_system_prompt_text_from_templates() -> None:
+    """Keep system-prompt prose in runtime prompt templates, not in the runner module."""
+
+    runner_source_text = Path(codex_runner.__file__).read_text(encoding="utf-8")
+
+    assert "Use Codex internal web search for search queries" not in runner_source_text
+    assert "All target source-page and source-data loading must go through" not in runner_source_text
+    assert "Do not use jq with guessed JSON paths" not in runner_source_text
 
 
 def test_browser_stage_uses_configured_mcp_url_without_direct_launcher(
@@ -61,7 +88,7 @@ def test_browser_stage_uses_configured_mcp_url_without_direct_launcher(
 
     monkeypatch.setattr(CodexStageRunner, "_subprocess_run", fake_subprocess_run)
 
-    result = codex_stage_run(
+    result = CodexStageRunner(workflow_container_name="example-container").run(
         allow_user_config=True,
         browser_runtime_mcp_url="http://127.0.0.1:8931/mcp",
         model_class=StageResult,
@@ -69,7 +96,6 @@ def test_browser_stage_uses_configured_mcp_url_without_direct_launcher(
         result_dir=tmp_path,
         stage_dir=tmp_path / "stage",
         stage_name="source_discover",
-        workflow_container_name="example-container",
     )
 
     command_text = "\n".join(captured_command)
@@ -128,7 +154,7 @@ def test_browser_stage_rejects_node_api_inside_browser_evaluate(
     monkeypatch.setattr(CodexStageRunner, "_subprocess_run", fake_subprocess_run)
 
     with pytest.raises(CodexStageError, match="Node.js"):
-        codex_stage_run(
+        CodexStageRunner().run(
             allow_user_config=True,
             browser_runtime_mcp_url="http://127.0.0.1:8931/mcp",
             model_class=StageResult,
@@ -179,13 +205,12 @@ def test_system_prompt_uses_runtime_project_name_parameter(
 
     monkeypatch.setattr(CodexStageRunner, "_subprocess_run", fake_subprocess_run)
 
-    codex_stage_run(
+    CodexStageRunner(workflow_container_name="custom-workflow").run(
         model_class=StageResult,
         prompt_text="Run schema task.",
         result_dir=tmp_path,
         stage_dir=tmp_path / "stage",
         stage_name="schema_stage",
-        workflow_container_name="custom-workflow",
     )
 
     assert "inside custom-workflow" in captured_prompt_list[0]
@@ -232,7 +257,7 @@ def test_browser_stage_system_prompt_forbids_browser_search_engine_pages(
 
     monkeypatch.setattr(CodexStageRunner, "_subprocess_run", fake_subprocess_run)
 
-    codex_stage_run(
+    CodexStageRunner().run(
         allow_user_config=True,
         browser_runtime_mcp_url="http://127.0.0.1:8931/mcp",
         model_class=StageResult,
@@ -243,7 +268,7 @@ def test_browser_stage_system_prompt_forbids_browser_search_engine_pages(
     )
 
     assert "Use Codex internal web search for search queries." in captured_prompt_list[0]
-    assert "Do not use browser tools or Playwright MCP to open public search-engine result pages." in (
+    assert "Do not use the configured browser or Playwright MCP to open public search-engine result pages." in (
         captured_prompt_list[0]
     )
 
@@ -285,7 +310,7 @@ def test_strict_schema_rejects_extra_output_fields(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(CodexStageRunner, "_subprocess_run", fake_subprocess_run)
 
     with pytest.raises(CodexStageError, match="returned invalid JSON"):
-        codex_stage_run(
+        CodexStageRunner().run(
             model_class=StageResult,
             prompt_text="Run schema task.",
             result_dir=tmp_path,

@@ -16,6 +16,7 @@ dependencies = [
 testpaths = ["test"]
 
 [tool.setuptools.packages.find]
+include = ["workflow_container_runtime*"]
 where = ["."]
 
 [tool.setuptools.package-data]

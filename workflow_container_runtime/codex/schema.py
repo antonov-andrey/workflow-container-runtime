@@ -13,11 +13,11 @@ def codex_output_schema_get(model_class: type[BaseModel]) -> dict[str, object]:
         Strict JSON schema.
     """
     schema = model_class.model_json_schema()
-    schema_strict_normalize(schema)
+    _schema_strict_normalize(schema)
     return schema
 
 
-def schema_strict_normalize(schema: object) -> None:
+def _schema_strict_normalize(schema: object) -> None:
     """Normalize one JSON schema tree in place for strict structured output.
 
     Args:
@@ -29,14 +29,13 @@ def schema_strict_normalize(schema: object) -> None:
             schema["required"] = sorted(properties)
             schema["additionalProperties"] = False
         for value in schema.values():
-            schema_strict_normalize(value)
+            _schema_strict_normalize(value)
         return
     if isinstance(schema, list):
         for value in schema:
-            schema_strict_normalize(value)
+            _schema_strict_normalize(value)
 
 
 __all__ = [
     "codex_output_schema_get",
-    "schema_strict_normalize",
 ]

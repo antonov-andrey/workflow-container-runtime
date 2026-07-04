@@ -12,51 +12,12 @@ from pydantic import BaseModel
 
 from workflow_container_runtime.artifact import JsonArtifactWriter
 from workflow_container_runtime.codex.schema import codex_output_schema_get
+from workflow_container_runtime.prompt import PromptRenderer
 
-CODEX_BROWSER_STAGE_SYSTEM_PROMPT = (
-    "You are a Codex browser workflow stage inside {workflow_container_name}. "
-    "Use Codex internal web search for search queries. "
-    "Do not use browser tools or Playwright MCP to open public search-engine result pages. "
-    "Use the configured browser tools only for target source pages selected from internal search results, site "
-    "navigation, saved evidence, or prompt context. "
-    "All target source-page and source-data loading must go through the configured browser. "
-    "All non-browser loading mechanisms are forbidden for target source data; curl, requests, wget, and direct HTTP "
-    "are examples, not an exhaustive list. "
-    "Do not open local result artifacts through browser tools; file://, localhost, or 127.0.0.1 URLs for local "
-    "artifacts are forbidden. "
-    "Read local artifact files through normal filesystem access. "
-    "Browser tools may write only evidence artifacts under browser evidence write directories. "
-    "Before clicking a page target, close or answer browser-visible cookie banners, drawers, and overlays that "
-    "intercept pointer events, then retry the target action. "
-    "When a selector or text locator matches multiple elements, use the browser snapshot to choose a scoped unique "
-    "target instead of repeating the broad locator. "
-    "Retry transient browser navigation failures such as ERR_NETWORK_CHANGED through the same configured browser "
-    "before treating the source as unavailable. "
-    "Do not use browser page context to write chart artifacts, result.json, verification.json, or audit JSON. "
-    "Do not use jq with guessed JSON paths; schema validation is already enforced by the workflow. "
-    "Do not use brittle glob scripts over heterogeneous JSON artifacts; validate each parsed JSON value shape before "
-    "field access and skip unrelated JSON artifact shapes. "
-    "Do not use browser_run_code_unsafe. "
-    "When extracting data from one opened page, use browser_evaluate with pure browser JavaScript only. "
-    "Browser JavaScript must read DOM, window, document, links, tables, page text, and browser-visible state, then "
-    "return serializable data. "
-    "Browser JavaScript must not use Node.js APIs or module systems such as require, dynamic import, node: modules, fs, "
-    "path, process, or Buffer. "
-    "Local artifact writing belongs to normal Codex filesystem access or workflow code outside page JavaScript. "
-    "You may write files only under absolute artifact write directories explicitly named in the prompt. "
-    "Do not write under referenced artifact directories unless the prompt explicitly names them as write directories. "
-    "Do not emit progress text. Return only the final JSON object that matches the supplied output schema."
-)
+CODEX_BROWSER_STAGE_SYSTEM_PROMPT_TEMPLATE_NAME = "system/codex_browser_stage.md.j2"
 CODEX_EXEC_INACTIVITY_TIMEOUT_SECONDS = 900
 CODEX_EXEC_POLL_SECONDS = 5
-CODEX_STAGE_SYSTEM_PROMPT = (
-    "You are a schema-bound workflow stage inside {workflow_container_name}. "
-    "Return only a JSON object that matches the supplied output schema. "
-    "Do not edit files. Read the referenced evidence files and preserve all source data. "
-    "Do not use jq with guessed JSON paths; schema validation is already enforced by the workflow. "
-    "Do not use brittle glob scripts over heterogeneous JSON artifacts; validate each parsed JSON value shape before "
-    "field access and skip unrelated JSON artifact shapes."
-)
+CODEX_STAGE_SYSTEM_PROMPT_TEMPLATE_NAME = "system/codex_stage.md.j2"
 PLAYWRIGHT_MCP_APPROVED_TOOL_LIST = [
     "browser_click",
     "browser_evaluate",
@@ -95,6 +56,7 @@ class CodexStageRunner:
         """
 
         self._artifact_writer = artifact_writer or JsonArtifactWriter()
+        self._prompt_renderer = PromptRenderer()
         self._workflow_container_name = workflow_container_name
 
     def run(
@@ -141,8 +103,7 @@ class CodexStageRunner:
             stderr_path=stderr_path,
         )
         self._artifact_writer.write(schema_path, codex_output_schema_get(model_class))
-        system_prompt_template = CODEX_BROWSER_STAGE_SYSTEM_PROMPT if allow_user_config else CODEX_STAGE_SYSTEM_PROMPT
-        system_prompt = system_prompt_template.format(workflow_container_name=self._workflow_container_name)
+        system_prompt = self._system_prompt_get(allow_user_config=allow_user_config)
         prompt_path.write_text(f"{system_prompt}\n\n{prompt_text}\n", encoding="utf-8")
         command = self._command_list_get(
             allow_user_config=allow_user_config,
@@ -166,6 +127,28 @@ class CodexStageRunner:
         if process.returncode != 0:
             raise CodexStageError(f"Codex stage {stage_name} failed with exit code {process.returncode}.")
         return self._output_model_get(model_class=model_class, output_path=output_path, stage_name=stage_name)
+
+    def _system_prompt_get(self, *, allow_user_config: bool) -> str:
+        """Render the Codex system prompt for one stage mode.
+
+        Args:
+            allow_user_config: Whether this stage may use user Codex config and browser MCP tools.
+
+        Returns:
+            Rendered system prompt text.
+        """
+
+        template_name = (
+            CODEX_BROWSER_STAGE_SYSTEM_PROMPT_TEMPLATE_NAME
+            if allow_user_config
+            else CODEX_STAGE_SYSTEM_PROMPT_TEMPLATE_NAME
+        )
+        return self._prompt_renderer.render(
+            template_name,
+            {
+                "workflow_container_name": self._workflow_container_name,
+            },
+        )
 
     def _browser_tool_argument_text_list_get(self, value: object) -> list[str]:
         """Return string leaves from one browser tool argument payload.
@@ -538,48 +521,7 @@ class CodexStageRunner:
             terminal_path.unlink(missing_ok=True)
 
 
-def codex_stage_run(
-    *,
-    allow_user_config: bool = False,
-    browser_runtime_mcp_url: str = "",
-    model_class: type[_ResultModelT],
-    prompt_text: str,
-    result_dir: Path,
-    stage_dir: Path,
-    stage_name: str,
-    workflow_container_name: str = "workflow-container",
-) -> _ResultModelT:
-    """Run one Codex semantic stage and validate its JSON result.
-
-    Args:
-        allow_user_config: Whether to load the configured Codex profile and MCP tools.
-        browser_runtime_mcp_url: Run-level browser/VPN runtime MCP URL for browser stages.
-        model_class: Pydantic model class for the stage result.
-        prompt_text: Stage prompt text.
-        result_dir: Root result directory used as Codex working directory.
-        stage_dir: Stage artifact directory.
-        stage_name: Stage name used for diagnostic artifact names.
-        workflow_container_name: Human-readable workflow container name for Codex system prompts.
-
-    Returns:
-        Validated stage result.
-
-    Raises:
-        CodexStageError: If Codex exits with an error or returns invalid JSON.
-    """
-    return CodexStageRunner(workflow_container_name=workflow_container_name).run(
-        allow_user_config=allow_user_config,
-        browser_runtime_mcp_url=browser_runtime_mcp_url,
-        model_class=model_class,
-        prompt_text=prompt_text,
-        result_dir=result_dir,
-        stage_dir=stage_dir,
-        stage_name=stage_name,
-    )
-
-
 __all__ = [
     "CodexStageError",
     "CodexStageRunner",
-    "codex_stage_run",
 ]

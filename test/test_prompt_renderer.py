@@ -17,6 +17,31 @@ def test_prompt_renderer_loads_runtime_partial_by_prefix() -> None:
     assert "browser_evaluate with pure browser JavaScript" in prompt_text
 
 
+def test_browser_system_prompt_is_domain_neutral() -> None:
+    """Keep browser-stage prompt text generic for every workflow container."""
+
+    prompt_text = PromptRenderer().render(
+        "runtime/system/codex_browser_stage.md.j2",
+        {"workflow_container_name": "example-container"},
+    )
+
+    assert "chart artifacts" not in prompt_text
+    assert "workflow output artifacts" in prompt_text
+
+
+def test_local_artifact_reading_contract_is_single_partial() -> None:
+    """Keep local-artifact reading rules in one runtime-owned partial."""
+    partial_path_list = [
+        Path("workflow_container_runtime/prompt/template/partial/artifact_reference_contract.md.j2"),
+        Path("workflow_container_runtime/prompt/template/partial/stage_verification_contract.md.j2"),
+    ]
+
+    for partial_path in partial_path_list:
+        partial_text = partial_path.read_text(encoding="utf-8")
+        assert '{% include "partial/local_artifact_reading_contract.md.j2" %}' in partial_text
+        assert "file://, localhost, or 127.0.0.1 URLs for local artifacts are forbidden" not in partial_text
+
+
 def test_prompt_renderer_prefers_project_template_then_runtime_partial(tmp_path: Path) -> None:
     """Render project templates that include runtime-owned partials."""
     template_dir = tmp_path / "template"
