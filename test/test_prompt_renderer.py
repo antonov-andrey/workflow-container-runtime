@@ -29,6 +29,25 @@ def test_browser_system_prompt_is_domain_neutral() -> None:
     assert "workflow output artifacts" in prompt_text
 
 
+def test_browser_browsing_error_contracts_are_runtime_partials() -> None:
+    """Keep browser browsing-error reporting and verification rules in runtime partials."""
+
+    result_prompt_text = PromptRenderer().render(
+        "runtime/partial/browser_browsing_error_result_contract.md.j2",
+        {},
+    )
+    verification_prompt_text = PromptRenderer().render(
+        "runtime/partial/browser_browsing_error_verification_contract.md.j2",
+        {},
+    )
+
+    assert "browsing_error_list" in result_prompt_text
+    assert "url" in result_prompt_text
+    assert "error" in result_prompt_text
+    assert "Verify that browsing_error_list matches" in verification_prompt_text
+    assert "must include browsing_error_list" not in verification_prompt_text
+
+
 def test_local_artifact_reading_contract_is_single_partial() -> None:
     """Keep local-artifact reading rules in one runtime-owned partial."""
     partial_path_list = [

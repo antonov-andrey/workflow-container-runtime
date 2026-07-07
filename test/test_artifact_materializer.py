@@ -2,29 +2,36 @@
 
 from pathlib import Path
 
-from workflow_container_runtime.artifact import ArtifactMaterializer
+from workflow_container_runtime.artifact import ArtifactMaterializationPolicy, ArtifactMaterializer
 
 
-def test_artifact_materializer_preserves_external_reference_inside_allowed_root(tmp_path: Path) -> None:
-    """Materialize allowed absolute references as result-dir-relative POSIX artifact paths."""
-
-    result_dir = tmp_path / "result"
-    external_root = result_dir / ".tool-output"
-    external_file = external_root / "source.json"
-    external_file.parent.mkdir(parents=True)
-    external_file.write_text("{}\n", encoding="utf-8")
-    materializer = ArtifactMaterializer(result_dir=result_dir, allowed_root_list=[external_root])
-
-    assert materializer.reference_list_materialize([str(external_file)]) == [".tool-output/source.json"]
-
-
-def test_artifact_materializer_resolves_relative_paths_from_result_dir(tmp_path: Path) -> None:
-    """Materialize result-dir-relative references without depending on process CWD."""
+def test_artifact_materializer_copies_stage_external_artifact_tree(tmp_path: Path) -> None:
+    """Copy configured external artifacts into the matching stage directory."""
 
     result_dir = tmp_path / "result"
-    external_file = result_dir / ".tool-output" / "source.json"
-    external_file.parent.mkdir(parents=True)
-    external_file.write_text("{}\n", encoding="utf-8")
-    materializer = ArtifactMaterializer(result_dir=result_dir, allowed_root_list=[Path(".tool-output")])
+    source_path = result_dir / ".playwright-mcp/current/stage/evidence/source.json"
+    stage_dir = result_dir / "stage"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text("{}\n", encoding="utf-8")
 
-    assert materializer.reference_list_materialize([".tool-output/source.json"]) == [".tool-output/source.json"]
+    ArtifactMaterializer(result_dir=result_dir).stage_artifact_materialize(
+        stage_dir=stage_dir,
+        policy=ArtifactMaterializationPolicy(),
+    )
+
+    assert (stage_dir / "evidence/source.json").read_text(encoding="utf-8") == "{}\n"
+
+
+def test_artifact_materializer_ignores_missing_stage_external_artifact_tree(tmp_path: Path) -> None:
+    """Treat absent configured external artifact trees as an empty materialization."""
+
+    result_dir = tmp_path / "result"
+    stage_dir = result_dir / "stage"
+    stage_dir.mkdir(parents=True)
+
+    ArtifactMaterializer(result_dir=result_dir).stage_artifact_materialize(
+        stage_dir=stage_dir,
+        policy=ArtifactMaterializationPolicy(),
+    )
+
+    assert list(stage_dir.iterdir()) == []

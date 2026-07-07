@@ -62,7 +62,6 @@ class CodexStageRunner:
     def run(
         self,
         *,
-        allow_user_config: bool = False,
         browser_runtime_mcp_url: str = "",
         model_class: type[_ResultModelT],
         prompt_text: str,
@@ -73,7 +72,6 @@ class CodexStageRunner:
         """Run one Codex semantic stage and validate its JSON result.
 
         Args:
-            allow_user_config: Whether to load the configured Codex profile and MCP tools.
             browser_runtime_mcp_url: Run-level browser/VPN runtime MCP URL for browser stages.
             model_class: Pydantic model class for the stage result.
             prompt_text: Stage prompt text.
@@ -89,6 +87,7 @@ class CodexStageRunner:
         """
         result_dir = result_dir.resolve()
         stage_dir = stage_dir.resolve()
+        have_browser_runtime = browser_runtime_mcp_url != ""
         stage_dir.mkdir(parents=True, exist_ok=True)
         diagnostic_dir = stage_dir / "diagnostics" / stage_name
         diagnostic_dir.mkdir(parents=True, exist_ok=True)
@@ -103,36 +102,34 @@ class CodexStageRunner:
             stderr_path=stderr_path,
         )
         self._artifact_writer.write(schema_path, codex_output_schema_get(model_class))
-        system_prompt = self._system_prompt_get(allow_user_config=allow_user_config)
+        system_prompt = self._system_prompt_get(have_browser_runtime=have_browser_runtime)
         prompt_path.write_text(f"{system_prompt}\n\n{prompt_text}\n", encoding="utf-8")
         command = self._command_list_get(
-            allow_user_config=allow_user_config,
             browser_runtime_mcp_url=browser_runtime_mcp_url,
             output_path=output_path,
             result_dir=result_dir,
             schema_path=schema_path,
-            stage_name=stage_name,
         )
         process = self._subprocess_run(
             command,
-            browser_artifact_activity=allow_user_config,
+            browser_artifact_activity=have_browser_runtime,
             input=prompt_path.read_text(encoding="utf-8"),
             result_dir=result_dir,
             stage_dir=stage_dir,
         )
         event_path.write_text(process.stdout, encoding="utf-8")
         stderr_path.write_text(process.stderr, encoding="utf-8")
-        if allow_user_config:
+        if have_browser_runtime:
             self._browser_tool_contract_validate(event_path=event_path, stage_name=stage_name)
         if process.returncode != 0:
             raise CodexStageError(f"Codex stage {stage_name} failed with exit code {process.returncode}.")
         return self._output_model_get(model_class=model_class, output_path=output_path, stage_name=stage_name)
 
-    def _system_prompt_get(self, *, allow_user_config: bool) -> str:
+    def _system_prompt_get(self, *, have_browser_runtime: bool) -> str:
         """Render the Codex system prompt for one stage mode.
 
         Args:
-            allow_user_config: Whether this stage may use user Codex config and browser MCP tools.
+            have_browser_runtime: Whether this stage has a browser runtime MCP URL.
 
         Returns:
             Rendered system prompt text.
@@ -140,7 +137,7 @@ class CodexStageRunner:
 
         template_name = (
             CODEX_BROWSER_STAGE_SYSTEM_PROMPT_TEMPLATE_NAME
-            if allow_user_config
+            if have_browser_runtime
             else CODEX_STAGE_SYSTEM_PROMPT_TEMPLATE_NAME
         )
         return self._prompt_renderer.render(
@@ -256,28 +253,22 @@ class CodexStageRunner:
     def _command_list_get(
         self,
         *,
-        allow_user_config: bool,
         browser_runtime_mcp_url: str,
         output_path: Path,
         result_dir: Path,
         schema_path: Path,
-        stage_name: str,
     ) -> list[str]:
         """Return the Codex CLI command for one stage.
 
         Args:
-            allow_user_config: Whether browser MCP configuration is enabled.
             browser_runtime_mcp_url: Browser/VPN runtime MCP URL.
             output_path: Final Codex message output path.
             result_dir: Root result directory used as Codex working directory.
             schema_path: Structured output schema path.
-            stage_name: Stage name used for diagnostics.
 
         Returns:
             Codex CLI command argv.
 
-        Raises:
-            CodexStageError: If a browser stage has no browser runtime URL.
         """
         command = [
             "codex",
@@ -298,9 +289,7 @@ class CodexStageRunner:
             str(result_dir),
             "-",
         ]
-        if allow_user_config:
-            if not browser_runtime_mcp_url:
-                raise CodexStageError(f"Codex browser stage {stage_name} has no browser/VPN runtime MCP URL.")
+        if browser_runtime_mcp_url:
             browser_config_args = self._playwright_mcp_config_arg_list_get(
                 browser_runtime_mcp_url=browser_runtime_mcp_url,
             )

@@ -89,7 +89,6 @@ def test_browser_stage_uses_configured_mcp_url_without_direct_launcher(
     monkeypatch.setattr(CodexStageRunner, "_subprocess_run", fake_subprocess_run)
 
     result = CodexStageRunner(workflow_container_name="example-container").run(
-        allow_user_config=True,
         browser_runtime_mcp_url="http://127.0.0.1:8931/mcp",
         model_class=StageResult,
         prompt_text="Run browser task.",
@@ -155,7 +154,6 @@ def test_browser_stage_rejects_node_api_inside_browser_evaluate(
 
     with pytest.raises(CodexStageError, match="Node.js"):
         CodexStageRunner().run(
-            allow_user_config=True,
             browser_runtime_mcp_url="http://127.0.0.1:8931/mcp",
             model_class=StageResult,
             prompt_text="Run browser task.",
@@ -258,7 +256,6 @@ def test_browser_stage_system_prompt_forbids_browser_search_engine_pages(
     monkeypatch.setattr(CodexStageRunner, "_subprocess_run", fake_subprocess_run)
 
     CodexStageRunner().run(
-        allow_user_config=True,
         browser_runtime_mcp_url="http://127.0.0.1:8931/mcp",
         model_class=StageResult,
         prompt_text="Run browser task.",
