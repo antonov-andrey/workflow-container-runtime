@@ -6,7 +6,7 @@ import tomllib
 import pytest
 
 import workflow_container_runtime
-from workflow_container_runtime.stage import BrowsingError
+from workflow_container_runtime.stage import BrowserActionResult, BrowsingError
 
 
 def test_package_version_exist() -> None:
@@ -34,3 +34,13 @@ def test_stage_browsing_error_validates_text_fields() -> None:
 
     with pytest.raises(ValueError, match="browsing error fields must be non-empty strings"):
         BrowsingError(error=" ", url="https://example.test")
+
+
+def test_stage_browser_action_result_has_generic_error_list() -> None:
+    """Validate generic browser-only action result payload."""
+
+    result = BrowserActionResult(browsing_error_list=[BrowsingError(error="blocked", url="https://example.test")])
+
+    assert result.model_dump(mode="json") == {
+        "browsing_error_list": [{"error": "blocked", "url": "https://example.test"}]
+    }

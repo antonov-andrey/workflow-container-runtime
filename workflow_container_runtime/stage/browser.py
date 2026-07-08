@@ -1,6 +1,6 @@
 """Generic browser-backed stage payload models."""
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class BrowsingError(BaseModel):
@@ -30,3 +30,11 @@ class BrowsingError(BaseModel):
         if not text:
             raise ValueError("browsing error fields must be non-empty strings")
         return text
+
+
+class BrowserActionResult(BaseModel):
+    """Browser-backed action-stage result with no domain payload."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    browsing_error_list: list[BrowsingError] = Field(default_factory=list)

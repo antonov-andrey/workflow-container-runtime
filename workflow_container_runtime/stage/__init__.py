@@ -1,6 +1,6 @@
 """Verified semantic stage runtime helpers."""
 
-from workflow_container_runtime.stage.browser import BrowsingError
+from workflow_container_runtime.stage.browser import BrowserActionResult, BrowsingError
 from workflow_container_runtime.stage.runner import (
     CodexStageRun,
     MAX_STAGE_ATTEMPT_COUNT,
@@ -18,6 +18,7 @@ from workflow_container_runtime.stage.runner import (
 )
 
 __all__ = [
+    "BrowserActionResult",
     "BrowsingError",
     "CodexStageRun",
     "MAX_STAGE_ATTEMPT_COUNT",
