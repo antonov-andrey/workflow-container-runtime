@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+import pytest
 from pydantic import BaseModel, ConfigDict
 
 from workflow_container_runtime.artifact import ArtifactMaterializationPolicy
@@ -206,6 +207,29 @@ def test_workflow_step_base_writes_standard_stage_files(tmp_path: Path) -> None:
     }
 
 
+def test_workflow_step_base_serializes_validated_result_state(tmp_path: Path) -> None:
+    """Serialize the validated result state after one mutating validator runs."""
+
+    class MutatingValidationStep(ExampleWorkflowStep):
+        """Workflow step with one mutating validator."""
+
+        def result_validate(self, result: ExampleResult) -> None:
+            """Mutate the result before final serialization.
+
+            Args:
+                result: Current public stage result.
+            """
+
+            result.value = result.value.upper()
+
+    stage = MutatingValidationStep(result_dir=tmp_path)
+
+    result = stage.run()
+
+    assert result == ExampleResult(value="DEFACTO")
+    assert json.loads((tmp_path / "stage/result.json").read_text(encoding="utf-8")) == {"value": "DEFACTO"}
+
+
 def test_workflow_step_codex_base_writes_input_result_and_verification(tmp_path: Path) -> None:
     """Write standard artifacts and route prompts by stage file path."""
 
@@ -232,6 +256,40 @@ def test_workflow_step_codex_base_writes_input_result_and_verification(tmp_path:
     }
     assert "input_path=stage/input.json" in fake_codex_runner.prompt_text_list[0]
     assert "stage_result_path=stage/result.json" in fake_codex_runner.prompt_text_list[1]
+
+
+def test_workflow_step_codex_base_serializes_validated_result_state(tmp_path: Path) -> None:
+    """Serialize the validated result state after one mutating validator runs."""
+
+    fake_codex_runner = FakeCodexStageRunner(
+        [
+            ExampleActionOutput(action_value="ok"),
+            StageVerificationResult(status="success"),
+        ]
+    )
+
+    class MutatingValidationStep(ExampleCodexStep):
+        """Codex-backed workflow step with one mutating validator."""
+
+        def result_validate(self, result: ExampleResult) -> None:
+            """Mutate the result before final serialization.
+
+            Args:
+                result: Current public stage result.
+            """
+
+            result.value = result.value.upper()
+
+    stage = MutatingValidationStep(
+        codex_stage_run_callable=fake_codex_runner.run,
+        prompt_renderer=PromptRenderer(template_dir=_template_dir_prepare(tmp_path)),
+        result_dir=tmp_path,
+    )
+
+    result = stage.run()
+
+    assert result == ExampleResult(value="OK")
+    assert json.loads((tmp_path / "stage/result.json").read_text(encoding="utf-8")) == {"value": "OK"}
 
 
 def test_workflow_step_codex_base_can_disable_default_browser_artifact_policy(tmp_path: Path) -> None:
@@ -347,6 +405,40 @@ def test_workflow_step_codex_base_feeds_mechanical_errors_to_action(tmp_path: Pa
     assert stage.validation_call_count == 2
 
 
+def test_workflow_step_codex_base_reraises_non_runtime_mechanical_error(tmp_path: Path) -> None:
+    """Reraise non-`RuntimeError` validation failures without retry feedback."""
+
+    fake_codex_runner = FakeCodexStageRunner([ExampleActionOutput(action_value="first")])
+
+    class NonRetryableFailureStep(ExampleCodexStep):
+        """Workflow step with one non-retryable validator failure."""
+
+        def result_validate(self, result: ExampleResult) -> None:
+            """Raise one non-retryable validator failure.
+
+            Args:
+                result: Current public stage result.
+
+            Raises:
+                ValueError: Always, to prove non-retryable failures propagate.
+            """
+
+            raise ValueError(f"bad result: {result.value}")
+
+    stage = NonRetryableFailureStep(
+        codex_stage_run_callable=fake_codex_runner.run,
+        prompt_renderer=PromptRenderer(template_dir=_template_dir_prepare(tmp_path)),
+        result_dir=tmp_path,
+    )
+
+    with pytest.raises(ValueError, match="bad result: first"):
+        stage.run()
+
+    assert fake_codex_runner.stage_name_list == ["sample_action"]
+    assert not (tmp_path / "stage/result.json").exists()
+    assert not (tmp_path / "stage/verification.json").exists()
+
+
 def test_workflow_step_codex_base_uses_default_browser_artifact_policy(tmp_path: Path) -> None:
     """Copy browser artifacts through the default runtime policy."""
 
@@ -379,6 +471,13 @@ def test_workflow_step_standard_stage_paths(tmp_path: Path) -> None:
     assert stage_result_path_get(stage_dir) == stage_dir / "result.json"
     assert stage_state_path_get(stage_dir) == stage_dir / "state.json"
     assert stage_verification_path_get(stage_dir) == stage_dir / "verification.json"
+
+
+def test_workflow_step_rejects_stage_dir_outside_result_dir(tmp_path: Path) -> None:
+    """Fail construction when the stage directory is outside the result root."""
+
+    with pytest.raises(ValueError, match="stage_dir must be inside result_dir"):
+        ExampleWorkflowStep(result_dir=tmp_path, stage_dir=tmp_path.parent / "external-stage")
 
 
 def test_workflow_step_verified_result_can_reuse_browser_base_model(tmp_path: Path) -> None:

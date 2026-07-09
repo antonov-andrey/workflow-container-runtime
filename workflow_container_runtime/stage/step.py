@@ -1,8 +1,7 @@
 """Workflow stage lifecycle owners."""
 
-from collections.abc import Callable
 from pathlib import Path
-from typing import Generic, Literal, TypeVar, cast
+from typing import Generic, Literal, Protocol, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -19,7 +18,20 @@ from workflow_container_runtime.stage.runner import CodexStageRun, MAX_STAGE_ATT
 ActionOutputT = TypeVar("ActionOutputT", bound=BaseModel)
 InputT = TypeVar("InputT", bound=BaseModel)
 ResultT = TypeVar("ResultT", bound=BaseModel)
-MechanicalValidate = Callable[[ResultT], None]
+
+
+class MechanicalValidate(Protocol[ResultT]):
+    """Mechanical validator contract for one public stage result."""
+
+    def __call__(self, result: ResultT) -> None:
+        """Validate one result and raise `RuntimeError` for retryable failures.
+
+        Args:
+            result: Typed public stage result.
+
+        Raises:
+            RuntimeError: If one retryable mechanical validation failure is found.
+        """
 
 
 def _model_contract_validate(model: BaseModel, *, model_name: str) -> None:
@@ -53,6 +65,23 @@ def _stage_relative_path_get(*, path: Path, result_dir: Path) -> str:
     return path.relative_to(result_dir).as_posix()
 
 
+def _stage_dir_validate(*, result_dir: Path, stage_dir: Path) -> None:
+    """Validate that the stage artifact directory stays under the result root.
+
+    Args:
+        result_dir: Root result directory.
+        stage_dir: Stage artifact directory.
+
+    Raises:
+        ValueError: If `stage_dir` is outside `result_dir`.
+    """
+
+    try:
+        stage_dir.relative_to(result_dir)
+    except ValueError as exc:
+        raise ValueError(f"stage_dir must be inside result_dir: stage_dir={stage_dir} result_dir={result_dir}") from exc
+
+
 class StageVerificationResult(BaseModel):
     """Verification result for one completed workflow-container stage."""
 
@@ -81,8 +110,9 @@ class WorkflowStepBase(WorkflowBase, Generic[InputT, ResultT]):
         """
 
         self._artifact_writer = artifact_writer or JsonArtifactWriter()
-        self._result_dir = result_dir
-        self._stage_dir = stage_dir or result_dir / "stage"
+        self._result_dir = result_dir.resolve()
+        self._stage_dir = (stage_dir or result_dir / "stage").resolve()
+        _stage_dir_validate(result_dir=self._result_dir, stage_dir=self._stage_dir)
 
     def input_build(self) -> InputT:
         """Build typed public stage input.
@@ -116,6 +146,9 @@ class WorkflowStepBase(WorkflowBase, Generic[InputT, ResultT]):
 
         Args:
             result: Typed public stage result.
+
+        Raises:
+            RuntimeError: If one retryable mechanical validation failure is found.
         """
 
         _ = result
@@ -132,8 +165,8 @@ class WorkflowStepBase(WorkflowBase, Generic[InputT, ResultT]):
         _model_contract_validate(stage_input, model_name="stage input")
         self._artifact_writer.write(stage_input_path_get(self._stage_dir), stage_input)
         result = self.result_build(stage_input)
-        self._artifact_writer.write(stage_result_path_get(self._stage_dir), result)
         self.result_validate(result)
+        self._artifact_writer.write(stage_result_path_get(self._stage_dir), result)
         self._artifact_writer.write(
             stage_verification_path_get(self._stage_dir), StageVerificationResult(status="success")
         )
@@ -218,7 +251,8 @@ class WorkflowStepCodexBase(WorkflowStepBase[InputT, ResultT], Generic[InputT, A
             Typed public stage result.
 
         Raises:
-            RuntimeError: If verification does not pass within the retry limit.
+            RuntimeError: If verification does not pass within the retry limit or if
+                `result_validate()` raises one retryable mechanical validation failure.
         """
 
         stage_key = self._stage_key_get()
@@ -240,13 +274,15 @@ class WorkflowStepCodexBase(WorkflowStepBase[InputT, ResultT], Generic[InputT, A
                 self._artifact_materialization_policy,
             )
             result = self.result_build(stage_input, action_output)
-            self._artifact_writer.write(stage_result_path_get(self._stage_dir), result)
             try:
                 self.result_validate(result)
             except RuntimeError as exc:
                 verification = StageVerificationResult(feedback_list=[str(exc)], status="failed")
             else:
+                self._artifact_writer.write(stage_result_path_get(self._stage_dir), result)
                 verification = self._verification_get(stage_key=stage_key)
+            if verification.status == "failed":
+                self._artifact_writer.write(stage_result_path_get(self._stage_dir), result)
             self._artifact_writer.write(stage_verification_path_get(self._stage_dir), verification)
             if verification.status == "success":
                 return result
