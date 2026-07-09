@@ -1,48 +1,51 @@
-"""Verified Codex stage runner tests."""
+"""Workflow step stage runtime tests."""
 
 import json
 from pathlib import Path
 
-import pytest
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict
 
 from workflow_container_runtime.artifact import ArtifactMaterializationPolicy
 from workflow_container_runtime.codex import CodexStageRunner
 from workflow_container_runtime.prompt import PromptRenderer
 from workflow_container_runtime.stage import (
+    BrowserActionResult,
     StageVerificationResult,
-    VerifiedCodexStageConfig,
-    VerifiedCodexStageRunner,
+    WorkflowStepBase,
+    WorkflowStepCodexBase,
+    stage_input_path_get,
     stage_result_path_get,
+    stage_state_path_get,
     stage_verification_path_get,
 )
 
 
-class StageResult(BaseModel):
-    """Simple action-stage result for verified runner tests."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    message: str
-    status: str
-
-
-class StagePromptContext(BaseModel):
-    """Simple prompt context for verified runner tests."""
+class ExampleInput(BaseModel):
+    """Typed public stage input for test workflow steps."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
     brand_name: str
 
 
-class NonStrictPromptContext(BaseModel):
-    """Prompt context that intentionally misses the strict boundary config."""
+class ExampleActionOutput(BaseModel):
+    """Codex action output for test workflow steps."""
 
-    brand_name: str
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    action_value: str
+
+
+class ExampleResult(BaseModel):
+    """Typed public stage result for test workflow steps."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    value: str
 
 
 class FakeCodexStageRunner(CodexStageRunner):
-    """Return queued models and keep prompt diagnostics for assertions."""
+    """Return queued models and capture prompts for assertions."""
 
     def __init__(self, result_list: list[BaseModel]) -> None:
         """Store queued stage results.
@@ -65,7 +68,7 @@ class FakeCodexStageRunner(CodexStageRunner):
         stage_dir: Path,
         stage_name: str,
     ) -> BaseModel:
-        """Return the next queued result.
+        """Return the next queued model.
 
         Args:
             browser_runtime_mcp_url: Unused browser runtime URL.
@@ -78,6 +81,7 @@ class FakeCodexStageRunner(CodexStageRunner):
         Returns:
             Next queued model.
         """
+
         _ = browser_runtime_mcp_url
         _ = model_class
         _ = result_dir
@@ -87,8 +91,71 @@ class FakeCodexStageRunner(CodexStageRunner):
         return self._result_list.pop(0)
 
 
+class ExampleWorkflowStep(WorkflowStepBase[ExampleInput, ExampleResult]):
+    """Deterministic workflow step for public file lifecycle tests."""
+
+    def input_build(self) -> ExampleInput:
+        """Build typed public stage input.
+
+        Returns:
+            Public stage input.
+        """
+
+        return ExampleInput(brand_name="Defacto")
+
+    def result_build(self, stage_input: ExampleInput) -> ExampleResult:
+        """Build public stage result.
+
+        Args:
+            stage_input: Typed public stage input.
+
+        Returns:
+            Public stage result.
+        """
+
+        return ExampleResult(value=stage_input.brand_name)
+
+
+class ExampleCodexStep(WorkflowStepCodexBase[ExampleInput, ExampleActionOutput, ExampleResult]):
+    """Codex-backed workflow step for runtime lifecycle tests."""
+
+    stage_key = "sample_action"
+
+    def action_output_model_get(self) -> type[ExampleActionOutput]:
+        """Return Codex action output model.
+
+        Returns:
+            Typed Codex action output model.
+        """
+
+        return ExampleActionOutput
+
+    def input_build(self) -> ExampleInput:
+        """Build typed public stage input.
+
+        Returns:
+            Public stage input.
+        """
+
+        return ExampleInput(brand_name="Defacto")
+
+    def result_build(self, stage_input: ExampleInput, action_output: ExampleActionOutput) -> ExampleResult:
+        """Build public result from input and action output.
+
+        Args:
+            stage_input: Typed public stage input.
+            action_output: Typed Codex action output.
+
+        Returns:
+            Public stage result.
+        """
+
+        _ = stage_input
+        return ExampleResult(value=action_output.action_value)
+
+
 def _template_dir_prepare(tmp_path: Path) -> Path:
-    """Create action and verification templates for verified runner tests.
+    """Create action and verification templates for workflow step tests.
 
     Args:
         tmp_path: Test temporary directory.
@@ -104,8 +171,8 @@ def _template_dir_prepare(tmp_path: Path) -> Path:
             [
                 "attempt={{ attempt_index }}",
                 "feedback={{ feedback_list }}",
-                "context_path={{ prompt_context_path }}",
-                "previous_result_path={{ previous_stage_result_path }}",
+                "input_path={{ input_path }}",
+                "previous_stage_result_path={{ previous_stage_result_path }}",
             ]
         ),
         encoding="utf-8",
@@ -113,9 +180,9 @@ def _template_dir_prepare(tmp_path: Path) -> Path:
     (template_dir / "sample_action_verify.md.j2").write_text(
         "\n".join(
             [
-                "result_path={{ stage_result_path }}",
+                "stage_result_path={{ stage_result_path }}",
                 "stage={{ stage_key }}",
-                "context_path={{ prompt_context_path }}",
+                "input_path={{ input_path }}",
             ]
         ),
         encoding="utf-8",
@@ -123,128 +190,51 @@ def _template_dir_prepare(tmp_path: Path) -> Path:
     return template_dir
 
 
-def _verified_stage_config_get(tmp_path: Path, **override_map: object) -> VerifiedCodexStageConfig:
-    """Return a verified stage config for tests.
+def test_workflow_step_base_writes_standard_stage_files(tmp_path: Path) -> None:
+    """Write deterministic input, result, and verification artifacts."""
 
-    Args:
-        tmp_path: Test temporary directory.
-        **override_map: Field overrides for the config model.
+    stage = ExampleWorkflowStep(result_dir=tmp_path)
 
-    Returns:
-        Verified stage config.
-    """
+    result = stage.run()
 
-    config_map = {
-        "prompt_context": StagePromptContext(brand_name="Defacto"),
-        "result_dir": tmp_path,
-        "stage_dir": tmp_path / "stage",
-        "stage_key": "sample_action",
+    assert result == ExampleResult(value="Defacto")
+    assert json.loads((tmp_path / "stage/input.json").read_text(encoding="utf-8")) == {"brand_name": "Defacto"}
+    assert json.loads((tmp_path / "stage/result.json").read_text(encoding="utf-8")) == {"value": "Defacto"}
+    assert json.loads((tmp_path / "stage/verification.json").read_text(encoding="utf-8")) == {
+        "feedback_list": [],
+        "status": "success",
     }
-    config_map.update(override_map)
-    return VerifiedCodexStageConfig(**config_map)
 
 
-def _mechanical_validate(result: StageResult) -> None:
-    """Accept one structurally valid test stage result.
+def test_workflow_step_codex_base_writes_input_result_and_verification(tmp_path: Path) -> None:
+    """Write standard artifacts and route prompts by stage file path."""
 
-    Args:
-        result: Current action-stage result.
-    """
-
-    _ = result
-
-
-def test_verified_stage_config_rejects_unknown_fields_and_exposes_defaults(tmp_path: Path) -> None:
-    """Validate verified stage config strictness and visible defaults."""
-
-    config = _verified_stage_config_get(tmp_path)
-    assert config.browser_runtime_mcp_url == ""
-    assert config.artifact_materialization_policy.artifact_root_list == [Path(".playwright-mcp/current")]
-    with pytest.raises(ValidationError):
-        VerifiedCodexStageConfig(
-            prompt_context=StagePromptContext(brand_name="Defacto"),
-            result_dir=tmp_path,
-            stage_dir=tmp_path / "stage",
-            stage_key="sample_action",
-            unexpected_field="bad",
-        )
-
-
-def test_verified_stage_config_requires_model_prompt_context(tmp_path: Path) -> None:
-    """Require prompt context to be one typed model instead of raw prompt text."""
-
-    with pytest.raises(ValidationError):
-        VerifiedCodexStageConfig(
-            prompt_context="domain context",
-            result_dir=tmp_path,
-            stage_dir=tmp_path / "stage",
-            stage_key="sample_action",
-        )
-    with pytest.raises(ValidationError):
-        VerifiedCodexStageConfig(
-            prompt_context=NonStrictPromptContext(brand_name="Defacto"),
-            result_dir=tmp_path,
-            stage_dir=tmp_path / "stage",
-            stage_key="sample_action",
-        )
-
-
-def test_verified_stage_runner_writes_prompt_context_artifact(tmp_path: Path) -> None:
-    """Persist typed prompt context and pass only its path into prompts."""
-
-    template_dir = tmp_path / "template"
-    template_dir.mkdir()
-    (template_dir / "sample_action.md.j2").write_text(
-        "context_path={{ prompt_context_path }}\ncontext={{ prompt_context | default('missing') }}",
-        encoding="utf-8",
-    )
-    (template_dir / "sample_action_verify.md.j2").write_text(
-        "context_path={{ prompt_context_path }}\nresult_path={{ stage_result_path }}",
-        encoding="utf-8",
-    )
     fake_codex_runner = FakeCodexStageRunner(
         [
-            StageResult(message="first", status="success"),
+            ExampleActionOutput(action_value="ok"),
             StageVerificationResult(status="success"),
         ]
     )
-
-    VerifiedCodexStageRunner(
+    stage = ExampleCodexStep(
         codex_stage_run_callable=fake_codex_runner.run,
-        prompt_renderer=PromptRenderer(template_dir=template_dir),
-    ).run(
-        config=_verified_stage_config_get(
-            tmp_path,
-            prompt_context=StagePromptContext(brand_name="Defacto"),
-        ),
-        mechanical_validate=_mechanical_validate,
-        model_class=StageResult,
+        prompt_renderer=PromptRenderer(template_dir=_template_dir_prepare(tmp_path)),
+        result_dir=tmp_path,
     )
 
-    assert json.loads((tmp_path / "stage/prompt_context.json").read_text(encoding="utf-8")) == {"brand_name": "Defacto"}
-    assert "context_path=stage/prompt_context.json" in fake_codex_runner.prompt_text_list[0]
-    assert "context=missing" in fake_codex_runner.prompt_text_list[0]
-    assert "context_path=stage/prompt_context.json" in fake_codex_runner.prompt_text_list[1]
+    result = stage.run()
+
+    assert result == ExampleResult(value="ok")
+    assert json.loads((tmp_path / "stage/input.json").read_text(encoding="utf-8")) == {"brand_name": "Defacto"}
+    assert json.loads((tmp_path / "stage/result.json").read_text(encoding="utf-8")) == {"value": "ok"}
+    assert json.loads((tmp_path / "stage/verification.json").read_text(encoding="utf-8")) == {
+        "feedback_list": [],
+        "status": "success",
+    }
+    assert "input_path=stage/input.json" in fake_codex_runner.prompt_text_list[0]
+    assert "stage_result_path=stage/result.json" in fake_codex_runner.prompt_text_list[1]
 
 
-def test_verified_stage_result_write_helper_owns_standard_artifacts(tmp_path: Path) -> None:
-    """Write deterministic verified stage artifacts through the runtime helper."""
-
-    from workflow_container_runtime.stage import verified_stage_artifact_write
-
-    result = StageResult(message="seed", status="success")
-    config = _verified_stage_config_get(tmp_path)
-
-    verified_stage_artifact_write(config=config, result=result)
-
-    assert json.loads((tmp_path / "stage/prompt_context.json").read_text(encoding="utf-8")) == {"brand_name": "Defacto"}
-    assert (tmp_path / "stage/result.json").is_file()
-    assert (tmp_path / "stage/verification.json").is_file()
-    assert '"message": "seed"' in (tmp_path / "stage/result.json").read_text(encoding="utf-8")
-    assert '"status": "success"' in (tmp_path / "stage/verification.json").read_text(encoding="utf-8")
-
-
-def test_verified_stage_runner_can_disable_default_browser_artifact_policy(tmp_path: Path) -> None:
+def test_workflow_step_codex_base_can_disable_default_browser_artifact_policy(tmp_path: Path) -> None:
     """Disable runtime browser artifact materialization through policy config."""
 
     browser_artifact_path = tmp_path / ".playwright-mcp/current/stage/evidence.txt"
@@ -252,80 +242,42 @@ def test_verified_stage_runner_can_disable_default_browser_artifact_policy(tmp_p
     browser_artifact_path.write_text("browser evidence", encoding="utf-8")
     fake_codex_runner = FakeCodexStageRunner(
         [
-            StageResult(message="first", status="success"),
+            ExampleActionOutput(action_value="ok"),
             StageVerificationResult(status="success"),
         ]
     )
-    runner = VerifiedCodexStageRunner(
+    stage = ExampleCodexStep(
+        artifact_materialization_policy=ArtifactMaterializationPolicy(artifact_root_list=[]),
         codex_stage_run_callable=fake_codex_runner.run,
         prompt_renderer=PromptRenderer(template_dir=_template_dir_prepare(tmp_path)),
+        result_dir=tmp_path,
     )
 
-    runner.run(
-        config=_verified_stage_config_get(
-            tmp_path,
-            artifact_materialization_policy=ArtifactMaterializationPolicy(
-                artifact_root_list=[],
-            ),
-        ),
-        mechanical_validate=_mechanical_validate,
-        model_class=StageResult,
-    )
+    stage.run()
 
     assert not (tmp_path / "stage/evidence.txt").exists()
 
 
-def test_verified_stage_runner_uses_default_browser_artifact_policy(tmp_path: Path) -> None:
-    """Copy browser artifacts through the default runtime policy."""
-
-    browser_artifact_path = tmp_path / ".playwright-mcp/current/stage/evidence.txt"
-    browser_artifact_path.parent.mkdir(parents=True)
-    browser_artifact_path.write_text("browser evidence", encoding="utf-8")
-    fake_codex_runner = FakeCodexStageRunner(
-        [
-            StageResult(message="first", status="success"),
-            StageVerificationResult(status="success"),
-        ]
-    )
-    runner = VerifiedCodexStageRunner(
-        codex_stage_run_callable=fake_codex_runner.run,
-        prompt_renderer=PromptRenderer(template_dir=_template_dir_prepare(tmp_path)),
-    )
-
-    runner.run(
-        config=_verified_stage_config_get(tmp_path),
-        mechanical_validate=_mechanical_validate,
-        model_class=StageResult,
-    )
-
-    assert (tmp_path / "stage/evidence.txt").read_text(encoding="utf-8") == "browser evidence"
-
-
-def test_verified_stage_runner_retries_with_feedback(tmp_path: Path) -> None:
-    """Retry action stage with verifier feedback and write standard artifacts."""
+def test_workflow_step_codex_base_retries_with_feedback(tmp_path: Path) -> None:
+    """Retry action stage with verifier feedback and previous result routing."""
 
     fake_codex_runner = FakeCodexStageRunner(
         [
-            StageResult(message="first", status="failed"),
+            ExampleActionOutput(action_value="first"),
             StageVerificationResult(feedback_list=["fix result"], status="failed"),
-            StageResult(message="second", status="success"),
+            ExampleActionOutput(action_value="second"),
             StageVerificationResult(status="success"),
         ]
     )
-    runner = VerifiedCodexStageRunner(
+    stage = ExampleCodexStep(
         codex_stage_run_callable=fake_codex_runner.run,
         prompt_renderer=PromptRenderer(template_dir=_template_dir_prepare(tmp_path)),
+        result_dir=tmp_path,
     )
 
-    result = runner.run(
-        config=_verified_stage_config_get(tmp_path),
-        mechanical_validate=_mechanical_validate,
-        model_class=StageResult,
-    )
+    result = stage.run()
 
-    assert result.message == "second"
-    assert (tmp_path / "stage" / "result.json").is_file()
-    assert (tmp_path / "stage" / "verification.json").is_file()
+    assert result == ExampleResult(value="second")
     assert fake_codex_runner.stage_name_list == [
         "sample_action",
         "sample_action_verify",
@@ -333,60 +285,153 @@ def test_verified_stage_runner_retries_with_feedback(tmp_path: Path) -> None:
         "sample_action_verify",
     ]
     assert "feedback=['fix result']" in fake_codex_runner.prompt_text_list[2]
-    assert "previous_result_path=" in fake_codex_runner.prompt_text_list[0]
-    assert "previous_result_path=stage/result.json" not in fake_codex_runner.prompt_text_list[0]
-    assert "previous_result_path=stage/result.json" in fake_codex_runner.prompt_text_list[2]
+    assert "previous_stage_result_path=" in fake_codex_runner.prompt_text_list[0]
+    assert "previous_stage_result_path=stage/result.json" not in fake_codex_runner.prompt_text_list[0]
+    assert "previous_stage_result_path=stage/result.json" in fake_codex_runner.prompt_text_list[2]
 
 
-def test_verified_stage_runner_feeds_mechanical_errors_to_action(tmp_path: Path) -> None:
-    """Convert mechanical validator failures into verifier feedback."""
+def test_workflow_step_codex_base_feeds_mechanical_errors_to_action(tmp_path: Path) -> None:
+    """Convert mechanical validator failures into retry feedback."""
 
     fake_codex_runner = FakeCodexStageRunner(
         [
-            StageResult(message="first", status="success"),
-            StageResult(message="second", status="success"),
+            ExampleActionOutput(action_value="first"),
+            ExampleActionOutput(action_value="second"),
             StageVerificationResult(status="success"),
         ]
     )
-    runner = VerifiedCodexStageRunner(
+
+    class MechanicalFailureStep(ExampleCodexStep):
+        """Workflow step that fails deterministic validation once."""
+
+        def __init__(self, **kwargs: object) -> None:
+            """Store validation call state.
+
+            Args:
+                **kwargs: Base workflow step constructor arguments.
+            """
+
+            super().__init__(**kwargs)
+            self.validation_call_count = 0
+
+        def result_validate(self, result: ExampleResult) -> None:
+            """Raise one deterministic error for the first result only.
+
+            Args:
+                result: Current public stage result.
+
+            Raises:
+                RuntimeError: If the first result must be retried.
+            """
+
+            self.validation_call_count += 1
+            if self.validation_call_count == 1:
+                raise RuntimeError(f"bad result: {result.value}")
+
+    stage = MechanicalFailureStep(
         codex_stage_run_callable=fake_codex_runner.run,
         prompt_renderer=PromptRenderer(template_dir=_template_dir_prepare(tmp_path)),
-    )
-    call_count = 0
-
-    def mechanical_validate(result: StageResult) -> None:
-        """Raise one mechanical error for the first action result only.
-
-        Args:
-            result: Current action-stage result.
-        """
-
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            raise RuntimeError(f"bad result: {result.message}")
-
-    result = runner.run(
-        config=_verified_stage_config_get(tmp_path),
-        mechanical_validate=mechanical_validate,
-        model_class=StageResult,
+        result_dir=tmp_path,
     )
 
-    assert result.message == "second"
+    result = stage.run()
+
+    assert result == ExampleResult(value="second")
     assert "feedback=['bad result: first']" in fake_codex_runner.prompt_text_list[1]
     assert fake_codex_runner.stage_name_list == [
         "sample_action",
         "sample_action",
         "sample_action_verify",
     ]
-    assert "previous_result_path=stage/result.json" in fake_codex_runner.prompt_text_list[1]
-    assert call_count == 2
+    assert "previous_stage_result_path=stage/result.json" in fake_codex_runner.prompt_text_list[1]
+    assert stage.validation_call_count == 2
 
 
-def test_verified_stage_runner_standard_stage_paths(tmp_path: Path) -> None:
-    """Expose standard public stage paths through runtime owner."""
+def test_workflow_step_codex_base_uses_default_browser_artifact_policy(tmp_path: Path) -> None:
+    """Copy browser artifacts through the default runtime policy."""
+
+    browser_artifact_path = tmp_path / ".playwright-mcp/current/stage/evidence.txt"
+    browser_artifact_path.parent.mkdir(parents=True)
+    browser_artifact_path.write_text("browser evidence", encoding="utf-8")
+    fake_codex_runner = FakeCodexStageRunner(
+        [
+            ExampleActionOutput(action_value="ok"),
+            StageVerificationResult(status="success"),
+        ]
+    )
+    stage = ExampleCodexStep(
+        codex_stage_run_callable=fake_codex_runner.run,
+        prompt_renderer=PromptRenderer(template_dir=_template_dir_prepare(tmp_path)),
+        result_dir=tmp_path,
+    )
+
+    stage.run()
+
+    assert (tmp_path / "stage/evidence.txt").read_text(encoding="utf-8") == "browser evidence"
+
+
+def test_workflow_step_standard_stage_paths(tmp_path: Path) -> None:
+    """Expose standard public and private stage paths."""
 
     stage_dir = tmp_path / "stage"
 
+    assert stage_input_path_get(stage_dir) == stage_dir / "input.json"
     assert stage_result_path_get(stage_dir) == stage_dir / "result.json"
+    assert stage_state_path_get(stage_dir) == stage_dir / "state.json"
     assert stage_verification_path_get(stage_dir) == stage_dir / "verification.json"
+
+
+def test_workflow_step_verified_result_can_reuse_browser_base_model(tmp_path: Path) -> None:
+    """Allow browser action output models in Codex-backed stage steps."""
+
+    fake_codex_runner = FakeCodexStageRunner(
+        [
+            BrowserActionResult(),
+            StageVerificationResult(status="success"),
+        ]
+    )
+
+    class BrowserResultStep(WorkflowStepCodexBase[ExampleInput, BrowserActionResult, ExampleResult]):
+        """Workflow step that uses browser action output."""
+
+        stage_key = "sample_action"
+
+        def action_output_model_get(self) -> type[BrowserActionResult]:
+            """Return browser action output model.
+
+            Returns:
+                Browser action output model.
+            """
+
+            return BrowserActionResult
+
+        def input_build(self) -> ExampleInput:
+            """Build typed public stage input.
+
+            Returns:
+                Public stage input.
+            """
+
+            return ExampleInput(brand_name="Defacto")
+
+        def result_build(self, stage_input: ExampleInput, action_output: BrowserActionResult) -> ExampleResult:
+            """Build public result from input and browser action output.
+
+            Args:
+                stage_input: Typed public stage input.
+                action_output: Typed browser action output.
+
+            Returns:
+                Public stage result.
+            """
+
+            _ = action_output
+            return ExampleResult(value=stage_input.brand_name)
+
+    stage = BrowserResultStep(
+        codex_stage_run_callable=fake_codex_runner.run,
+        prompt_renderer=PromptRenderer(template_dir=_template_dir_prepare(tmp_path)),
+        result_dir=tmp_path,
+    )
+
+    assert stage.run() == ExampleResult(value="Defacto")

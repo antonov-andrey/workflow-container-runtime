@@ -1,10 +1,10 @@
 Stage: {{ stage_key }}
 Attempt: {{ attempt_index }}
 
-Stage prompt context path:
-{{ prompt_context_path }}
+Input path:
+{{ input_path }}
 
-{% if attempt_index > 1 %}Previous stage result path:
+{% if previous_stage_result_path %}Previous stage result path:
 {{ previous_stage_result_path }}
 {% endif %}
 
