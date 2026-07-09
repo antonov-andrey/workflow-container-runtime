@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from workflow_container_runtime.artifact import ArtifactMaterializationPolicy
 from workflow_container_runtime.codex import CodexStageRunner
@@ -256,6 +256,13 @@ def test_workflow_step_codex_base_writes_input_result_and_verification(tmp_path:
     }
     assert "input_path=stage/input.json" in fake_codex_runner.prompt_text_list[0]
     assert "stage_result_path=stage/result.json" in fake_codex_runner.prompt_text_list[1]
+
+
+def test_workflow_step_verification_result_rejects_success_feedback() -> None:
+    """Reject verifier success payloads that still contain feedback."""
+
+    with pytest.raises(ValidationError, match="success verification must not contain feedback"):
+        StageVerificationResult(feedback_list=["still wrong"], status="success")
 
 
 def test_workflow_step_codex_base_serializes_validated_result_state(tmp_path: Path) -> None:

@@ -14,6 +14,7 @@
 - Public API, stable runtime boundaries, and non-trivial modules must have docstrings that describe real behavior.
 - Runtime configuration and runtime result objects must use strict Pydantic models when they carry stable field-like data.
 - Tests must use `pytest`.
+- Tests must not verify instruction artifacts by checking that specific prose, headings, phrases, examples, files, or placement rules exist or do not exist. Instruction artifacts are verified by semantic reread or semantic audit, not by pytest assertions over text or instruction artifact paths.
 
 ## Verification
 - Run `python -m pytest -q` after Python behavior changes.

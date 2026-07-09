@@ -1,9 +1,9 @@
 """Workflow stage lifecycle owners."""
 
 from pathlib import Path
-from typing import Generic, Literal, Protocol, TypeVar, cast
+from typing import Generic, Literal, Protocol, Self, TypeVar, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from workflow_container_runtime.artifact import ArtifactMaterializationPolicy, ArtifactMaterializer, JsonArtifactWriter
 from workflow_container_runtime.codex import CodexStageRunner
@@ -89,6 +89,21 @@ class StageVerificationResult(BaseModel):
 
     feedback_list: list[str] = Field(default_factory=list)
     status: Literal["success", "failed"]
+
+    @model_validator(mode="after")
+    def success_feedback_validate(self) -> Self:
+        """Reject success verdicts with retry feedback.
+
+        Returns:
+            Validated verification result.
+
+        Raises:
+            ValueError: If a successful verification still carries feedback.
+        """
+
+        if self.status == "success" and self.feedback_list:
+            raise ValueError("success verification must not contain feedback")
+        return self
 
 
 class WorkflowBase:
