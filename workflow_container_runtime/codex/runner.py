@@ -1,4 +1,6 @@
-"""Codex-backed semantic stage execution."""
+"""Low-level Codex subprocess execution with typed structured output."""
+
+from __future__ import annotations
 
 import json
 import os
@@ -11,15 +13,18 @@ from typing import TypeVar
 from pydantic import BaseModel
 
 from workflow_container_runtime.artifact import JsonArtifactWriter
-from workflow_container_runtime.codex.schema import codex_output_schema_get
+from workflow_container_runtime.capability import WorkflowRuntimeCapability
+from workflow_container_runtime.codex.config import CodexRunnerConfig
 from workflow_container_runtime.prompt import PromptRenderer
+from workflow_container_runtime.retry import CodexExecutionRetryPolicy
 
-CODEX_BROWSER_STAGE_SYSTEM_PROMPT_TEMPLATE_NAME = "system/codex_browser_stage.md.j2"
+CODEX_BROWSER_STEP_SYSTEM_PROMPT_TEMPLATE_NAME = "runtime/system/codex_browser_step.md.j2"
 CODEX_EXEC_INACTIVITY_TIMEOUT_SECONDS = 900
 CODEX_EXEC_POLL_SECONDS = 5
-CODEX_STAGE_SYSTEM_PROMPT_TEMPLATE_NAME = "system/codex_stage.md.j2"
+CODEX_STEP_SYSTEM_PROMPT_TEMPLATE_NAME = "runtime/system/codex_step.md.j2"
 PLAYWRIGHT_MCP_APPROVED_TOOL_LIST = [
     "browser_click",
+    "browser_close",
     "browser_evaluate",
     "browser_navigate",
     "browser_resize",
@@ -35,61 +40,108 @@ BROWSER_JAVASCRIPT_FORBIDDEN_PATTERN_LIST = [
 ]
 PLAYWRIGHT_MCP_CODE_TOOL_SET = {"browser_evaluate", "browser_run_code_unsafe"}
 PLAYWRIGHT_MCP_FORBIDDEN_TOOL_SET = {"browser_run_code_unsafe"}
-_ResultModelT = TypeVar("_ResultModelT", bound=BaseModel)
+OutputT = TypeVar("OutputT", bound=BaseModel)
 
 
-class CodexStageError(RuntimeError):
-    """Raised when one Codex semantic stage fails."""
+class CodexExecutionError(RuntimeError):
+    """Raised when one low-level Codex execution cannot return valid output."""
 
 
-class CodexStageRunner:
-    """Run one Codex stage through the Codex CLI and validate its JSON output."""
+class CodexRunner:
+    """Run Codex through its CLI and validate one structured response."""
 
     def __init__(
-        self, artifact_writer: JsonArtifactWriter | None = None, workflow_container_name: str = "workflow-container"
+        self,
+        *,
+        artifact_writer: JsonArtifactWriter,
+        config: CodexRunnerConfig,
+        prompt_renderer: PromptRenderer,
+        workflow_container_name: str,
     ) -> None:
-        """Initialize the Codex stage runner.
+        """Initialize reusable Codex execution dependencies.
 
         Args:
             artifact_writer: JSON artifact writer used for schema diagnostics.
+            config: Explicit model and reasoning selection.
+            prompt_renderer: Runtime system-prompt renderer.
             workflow_container_name: Human-readable workflow container name for Codex system prompts.
         """
 
-        self._artifact_writer = artifact_writer or JsonArtifactWriter()
-        self._prompt_renderer = PromptRenderer()
+        self._artifact_writer = artifact_writer
+        self._config = config
+        self._prompt_renderer = prompt_renderer
         self._workflow_container_name = workflow_container_name
 
     def run(
         self,
         *,
-        browser_runtime_mcp_url: str = "",
-        model_class: type[_ResultModelT],
-        prompt_text: str,
-        result_dir: Path,
-        stage_dir: Path,
-        stage_name: str,
-    ) -> _ResultModelT:
-        """Run one Codex semantic stage and validate its JSON result.
+        diagnostic_dir: Path,
+        output_model: type[OutputT],
+        prompt: str,
+        retry_policy: CodexExecutionRetryPolicy,
+        runtime_capability: WorkflowRuntimeCapability,
+        working_directory: Path,
+    ) -> OutputT:
+        """Run one low-level Codex action with bounded transport retries.
 
         Args:
-            browser_runtime_mcp_url: Run-level browser/VPN runtime MCP URL for browser stages.
-            model_class: Pydantic model class for the stage result.
-            prompt_text: Stage prompt text.
-            result_dir: Root result directory used as Codex working directory.
-            stage_dir: Stage artifact directory.
-            stage_name: Stage name used for diagnostic artifact names.
+            diagnostic_dir: Deterministic base directory for this action's diagnostics.
+            output_model: Pydantic model class for the structured response.
+            prompt: Action prompt text.
+            retry_policy: Low-level Codex retry limit.
+            runtime_capability: Explicit capabilities granted to this action.
+            working_directory: Root directory used as Codex working directory.
 
         Returns:
-            Validated stage result.
+            Validated Codex response.
 
         Raises:
-            CodexStageError: If Codex exits with an error or returns invalid JSON.
+            CodexExecutionError: If no attempt returns valid structured output.
         """
-        result_dir = result_dir.resolve()
-        stage_dir = stage_dir.resolve()
+        diagnostic_dir = diagnostic_dir.resolve()
+        working_directory = working_directory.resolve()
+        browser_runtime_mcp_url = "" if runtime_capability.browser is None else runtime_capability.browser.mcp_url
+        execution_error: CodexExecutionError | None = None
+        for attempt_index in range(1, retry_policy.attempt_limit + 1):
+            try:
+                return self._attempt_run(
+                    browser_runtime_mcp_url=browser_runtime_mcp_url,
+                    diagnostic_dir=diagnostic_dir / f"attempt_{attempt_index:03d}",
+                    output_model=output_model,
+                    prompt=prompt,
+                    working_directory=working_directory,
+                )
+            except CodexExecutionError as exc:
+                execution_error = exc
+        raise CodexExecutionError(
+            f"Codex execution failed after {retry_policy.attempt_limit} attempts: {execution_error}"
+        ) from execution_error
+
+    def _attempt_run(
+        self,
+        *,
+        browser_runtime_mcp_url: str,
+        diagnostic_dir: Path,
+        output_model: type[OutputT],
+        prompt: str,
+        working_directory: Path,
+    ) -> OutputT:
+        """Run one Codex subprocess attempt and preserve its diagnostics.
+
+        Args:
+            browser_runtime_mcp_url: Configured browser runtime endpoint, when available.
+            diagnostic_dir: Directory that owns this exact attempt's diagnostics.
+            output_model: Pydantic model class for the structured response.
+            prompt: Action prompt text.
+            working_directory: Root directory used as Codex working directory.
+
+        Returns:
+            Validated structured response.
+
+        Raises:
+            CodexExecutionError: If Codex exits unsuccessfully or returns invalid output.
+        """
         have_browser_runtime = browser_runtime_mcp_url != ""
-        stage_dir.mkdir(parents=True, exist_ok=True)
-        diagnostic_dir = stage_dir / "diagnostics" / stage_name
         diagnostic_dir.mkdir(parents=True, exist_ok=True)
         prompt_path = diagnostic_dir / "prompt.md"
         output_path = diagnostic_dir / "codex_output.json"
@@ -101,48 +153,48 @@ class CodexStageRunner:
             output_path=output_path,
             stderr_path=stderr_path,
         )
-        self._artifact_writer.write(schema_path, codex_output_schema_get(model_class))
+        self._artifact_writer.schema_write(schema_path, output_model)
         system_prompt = self._system_prompt_get(have_browser_runtime=have_browser_runtime)
-        prompt_path.write_text(f"{system_prompt}\n\n{prompt_text}\n", encoding="utf-8")
+        prompt_path.write_text(f"{system_prompt}\n\n{prompt}\n", encoding="utf-8")
         command = self._command_list_get(
             browser_runtime_mcp_url=browser_runtime_mcp_url,
             output_path=output_path,
-            result_dir=result_dir,
+            working_directory=working_directory,
             schema_path=schema_path,
         )
         process = self._subprocess_run(
             command,
             browser_artifact_activity=have_browser_runtime,
             input=prompt_path.read_text(encoding="utf-8"),
-            result_dir=result_dir,
-            stage_dir=stage_dir,
+            diagnostic_dir=diagnostic_dir,
+            working_directory=working_directory,
         )
         event_path.write_text(process.stdout, encoding="utf-8")
         stderr_path.write_text(process.stderr, encoding="utf-8")
         if have_browser_runtime:
-            self._browser_tool_contract_validate(event_path=event_path, stage_name=stage_name)
+            self._browser_tool_contract_validate(event_path=event_path)
         if process.returncode != 0:
-            raise CodexStageError(f"Codex stage {stage_name} failed with exit code {process.returncode}.")
-        return self._output_model_get(model_class=model_class, output_path=output_path, stage_name=stage_name)
+            raise CodexExecutionError(f"Codex execution failed with exit code {process.returncode}.")
+        return self._output_model_get(output_model=output_model, output_path=output_path)
 
     def _system_prompt_get(self, *, have_browser_runtime: bool) -> str:
-        """Render the Codex system prompt for one stage mode.
+        """Render the Codex system prompt for one step mode.
 
         Args:
-            have_browser_runtime: Whether this stage has a browser runtime MCP URL.
+            have_browser_runtime: Whether this step has a browser runtime MCP URL.
 
         Returns:
             Rendered system prompt text.
         """
 
         template_name = (
-            CODEX_BROWSER_STAGE_SYSTEM_PROMPT_TEMPLATE_NAME
+            CODEX_BROWSER_STEP_SYSTEM_PROMPT_TEMPLATE_NAME
             if have_browser_runtime
-            else CODEX_STAGE_SYSTEM_PROMPT_TEMPLATE_NAME
+            else CODEX_STEP_SYSTEM_PROMPT_TEMPLATE_NAME
         )
         return self._prompt_renderer.render(
-            template_name,
-            {
+            template_name=template_name,
+            variable_by_name_map={
                 "workflow_container_name": self._workflow_container_name,
             },
         )
@@ -171,15 +223,37 @@ class CodexStageRunner:
             return text_list
         return []
 
-    def _browser_tool_contract_validate(self, *, event_path: Path, stage_name: str) -> None:
-        """Validate browser tool usage emitted by one Codex browser stage.
+    def _browser_artifact_path_get(self, *, diagnostic_dir: Path, working_directory: Path) -> Path | None:
+        """Return the mirrored external artifact tree for the current step.
+
+        Args:
+            diagnostic_dir: Current Codex attempt diagnostic directory.
+            working_directory: Root result directory mirrored by the external artifact root.
+
+        Returns:
+            Mirrored current-step path, or `None` outside the standard diagnostics layout.
+        """
+
+        diagnostics_dir = next(
+            (path for path in (diagnostic_dir, *diagnostic_dir.parents) if path.name == "diagnostics"),
+            None,
+        )
+        if diagnostics_dir is None:
+            return None
+        try:
+            step_relative_path = diagnostics_dir.parent.relative_to(working_directory)
+        except ValueError:
+            return None
+        return working_directory / ".playwright-mcp" / "current" / step_relative_path
+
+    def _browser_tool_contract_validate(self, *, event_path: Path) -> None:
+        """Validate browser tool usage emitted by one Codex browser step.
 
         Args:
             event_path: Codex JSONL event stream path.
-            stage_name: Stage name used for diagnostics.
 
         Raises:
-            CodexStageError: If one browser tool call violates the page-JavaScript contract.
+            CodexExecutionError: If one browser tool call violates the page-JavaScript contract.
         """
 
         error_list: list[str] = []
@@ -213,26 +287,24 @@ class CodexStageRunner:
                     break
         if error_list:
             error_text = "; ".join(error_list)
-            raise CodexStageError(
-                f"Codex browser stage {stage_name} violated browser JavaScript contract: {error_text}"
-            )
+            raise CodexExecutionError(f"Codex browser execution violated browser JavaScript contract: {error_text}")
 
-    def _codex_completion_output_exist(self, *, output_path: Path | None, stage_dir: Path) -> bool:
+    def _codex_completion_output_exist(self, *, diagnostic_dir: Path, output_path: Path | None) -> bool:
         """Return whether Codex wrote final output and reported turn completion.
 
         Args:
+            diagnostic_dir: Current attempt diagnostic directory.
             output_path: `codex exec --output-last-message` path.
-            stage_dir: Stage artifact directory watched for diagnostics.
 
         Returns:
-            Whether the stage has enough terminal artifacts to stop a stuck process tree.
+            Whether the attempt has enough terminal artifacts to stop a stuck process tree.
         """
         if output_path is None or not output_path.is_file() or output_path.stat().st_size == 0:
             return False
-        for event_path in stage_dir.glob("diagnostics/*/event.jsonl"):
-            if self._file_tail_contain(event_path=event_path, needle='"type":"turn.completed"'):
-                return True
-        return False
+        return self._file_tail_contain(
+            event_path=diagnostic_dir / "event.jsonl",
+            needle='"type":"turn.completed"',
+        )
 
     def _codex_output_path_get(self, command: list[str]) -> Path | None:
         """Return the `--output-last-message` path from one Codex command.
@@ -255,15 +327,15 @@ class CodexStageRunner:
         *,
         browser_runtime_mcp_url: str,
         output_path: Path,
-        result_dir: Path,
+        working_directory: Path,
         schema_path: Path,
     ) -> list[str]:
-        """Return the Codex CLI command for one stage.
+        """Return the Codex CLI command for one low-level execution.
 
         Args:
             browser_runtime_mcp_url: Browser/VPN runtime MCP URL.
             output_path: Final Codex message output path.
-            result_dir: Root result directory used as Codex working directory.
+            working_directory: Root directory used as Codex working directory.
             schema_path: Structured output schema path.
 
         Returns:
@@ -273,6 +345,8 @@ class CodexStageRunner:
         command = [
             "codex",
             "exec",
+            "--model",
+            self._config.model,
             "--output-schema",
             str(schema_path),
             "--output-last-message",
@@ -283,10 +357,12 @@ class CodexStageRunner:
             "--ignore-user-config",
             "-c",
             'approval_policy="never"',
+            "-c",
+            f'model_reasoning_effort="{self._config.model_reasoning_effort}"',
             "--ignore-rules",
             "--skip-git-repo-check",
             "--cd",
-            str(result_dir),
+            str(working_directory),
             "-",
         ]
         if browser_runtime_mcp_url:
@@ -325,27 +401,25 @@ class CodexStageRunner:
     def _output_model_get(
         self,
         *,
-        model_class: type[_ResultModelT],
+        output_model: type[OutputT],
         output_path: Path,
-        stage_name: str,
-    ) -> _ResultModelT:
-        """Return the validated Codex stage output model.
+    ) -> OutputT:
+        """Return the validated Codex output model.
 
         Args:
-            model_class: Pydantic model class for the stage result.
+            output_model: Pydantic model class for the structured response.
             output_path: Final Codex message output path.
-            stage_name: Stage name used for diagnostics.
 
         Returns:
-            Validated stage result.
+            Validated structured response.
 
         Raises:
-            CodexStageError: If the stage output cannot be parsed as the expected model.
+            CodexExecutionError: If the output cannot be parsed as the expected model.
         """
         try:
-            return model_class.model_validate_json(output_path.read_text(encoding="utf-8"))
+            return output_model.model_validate_json(output_path.read_text(encoding="utf-8"))
         except Exception as exc:
-            raise CodexStageError(f"Codex stage {stage_name} returned invalid JSON: {exc}") from exc
+            raise CodexExecutionError(f"Codex execution returned invalid JSON: {exc}") from exc
 
     def _path_activity_marker_get(self, path: Path) -> int:
         """Return activity marker for one path tree.
@@ -435,18 +509,18 @@ class CodexStageRunner:
         command: list[str],
         *,
         browser_artifact_activity: bool,
+        diagnostic_dir: Path,
         input: str,
-        result_dir: Path,
-        stage_dir: Path,
+        working_directory: Path,
     ) -> subprocess.CompletedProcess[str]:
         """Run `codex exec` with an artifact-activity inactivity timeout.
 
         Args:
             command: Codex command argv.
             browser_artifact_activity: Whether browser MCP artifacts count as subprocess activity.
+            diagnostic_dir: Current attempt diagnostic directory watched for progress.
             input: Prompt text sent to Codex stdin.
-            result_dir: Root result directory.
-            stage_dir: Stage artifact directory watched for progress.
+            working_directory: Codex working directory.
 
         Returns:
             Completed process with captured stdout and stderr.
@@ -462,10 +536,16 @@ class CodexStageRunner:
         communicate_input: str | None = input
         inactivity_seconds = 0
         output_path = self._codex_output_path_get(command)
-        activity_path_list = [stage_dir]
+        activity_path_list = [] if output_path is None else [output_path]
         if browser_artifact_activity:
-            activity_path_list.append(result_dir / ".playwright-mcp" / "current" / stage_dir.relative_to(result_dir))
-        stage_activity_marker = self._path_activity_marker_list_get(activity_path_list)
+            browser_artifact_path = self._browser_artifact_path_get(
+                diagnostic_dir=diagnostic_dir,
+                working_directory=working_directory,
+            )
+            if browser_artifact_path is not None:
+                activity_path_list.append(browser_artifact_path)
+        execution_activity_marker = self._path_activity_marker_list_get(activity_path_list)
+        partial_stdout_text = ""
         while True:
             try:
                 stdout, stderr = process.communicate(
@@ -477,14 +557,24 @@ class CodexStageRunner:
                 return subprocess.CompletedProcess(
                     args=command, returncode=process.returncode, stdout=stdout, stderr=stderr
                 )
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired as exc:
                 communicate_input = None
-                if self._codex_completion_output_exist(output_path=output_path, stage_dir=stage_dir):
+                partial_stdout = exc.stdout or ""
+                if isinstance(partial_stdout, bytes):
+                    partial_stdout = partial_stdout.decode(errors="replace")
+                partial_stdout_changed = partial_stdout != partial_stdout_text
+                if partial_stdout_changed:
+                    partial_stdout_text = partial_stdout
+                    (diagnostic_dir / "event.jsonl").write_text(partial_stdout, encoding="utf-8")
+                if self._codex_completion_output_exist(
+                    diagnostic_dir=diagnostic_dir,
+                    output_path=output_path,
+                ):
                     stdout, stderr = self._process_group_terminate(process)
                     return subprocess.CompletedProcess(args=command, returncode=0, stdout=stdout, stderr=stderr)
-                current_stage_activity_marker = self._path_activity_marker_list_get(activity_path_list)
-                if current_stage_activity_marker != stage_activity_marker:
-                    stage_activity_marker = current_stage_activity_marker
+                current_execution_activity_marker = self._path_activity_marker_list_get(activity_path_list)
+                if partial_stdout_changed or current_execution_activity_marker != execution_activity_marker:
+                    execution_activity_marker = current_execution_activity_marker
                     inactivity_seconds = 0
                     continue
                 inactivity_seconds += CODEX_EXEC_POLL_SECONDS
@@ -494,7 +584,7 @@ class CodexStageRunner:
                 stdout, stderr = process.communicate()
                 timeout_stderr = (
                     f"{stderr}\nCodex exec timed out after {CODEX_EXEC_INACTIVITY_TIMEOUT_SECONDS} seconds "
-                    "without stage artifact activity.\n"
+                    "without execution artifact activity.\n"
                 )
                 return subprocess.CompletedProcess(args=command, returncode=124, stdout=stdout, stderr=timeout_stderr)
 
@@ -511,6 +601,6 @@ class CodexStageRunner:
 
 
 __all__ = [
-    "CodexStageError",
-    "CodexStageRunner",
+    "CodexExecutionError",
+    "CodexRunner",
 ]

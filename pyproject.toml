@@ -4,13 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "workflow-container-runtime"
-version = "0.1.0"
+version = "0.3.0"
 description = "Reusable runtime mechanics for workflow-container projects"
 requires-python = ">=3.14"
 dependencies = [
+  "dbos>=2.0.0",
   "Jinja2>=3.1.0",
   "pydantic>=2.0",
+  "workflow-container-contract>=0.2.0,<0.3",
 ]
+
+[project.optional-dependencies]
+test = ["pytest>=8.4.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["test"]
@@ -25,3 +30,6 @@ where = ["."]
 
 [tool.setuptools.package-data]
 workflow_container_runtime = ["prompt/template/**/*.j2"]
+
+[tool.uv.sources]
+workflow-container-contract = { path = "../workflow-container-contract", editable = true }

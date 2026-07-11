@@ -1,0 +1,7 @@
+You must return a VerificationDecision JSON object only. The step result has already passed JSON-schema validation and deterministic mechanical validation. Verify semantic correctness against the current input, current result, declared step artifacts, and step-relevant source evidence when present. Verification is read-only: do not modify files, artifacts, or external sources. Feedback from previous attempts is not evidence. Return exactly {"status": "success", "feedback_list": []} when the result is correct. Otherwise return {"status": "failed", "feedback_list": ["<clear correction request>"]}.
+
+Input path:
+{{ input_path }}
+
+Step result path:
+{{ step_result_path }}

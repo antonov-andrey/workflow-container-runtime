@@ -1,10 +1,10 @@
-"""Codex stage runtime boundary."""
+"""Low-level Codex runtime boundary."""
 
-from workflow_container_runtime.codex.runner import CodexStageError, CodexStageRunner
-from workflow_container_runtime.codex.schema import codex_output_schema_get
+from workflow_container_runtime.codex.config import CodexRunnerConfig
+from workflow_container_runtime.codex.runner import CodexExecutionError, CodexRunner
 
 __all__ = [
-    "CodexStageError",
-    "CodexStageRunner",
-    "codex_output_schema_get",
+    "CodexExecutionError",
+    "CodexRunner",
+    "CodexRunnerConfig",
 ]

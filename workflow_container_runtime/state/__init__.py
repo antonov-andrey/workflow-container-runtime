@@ -1,8 +1,9 @@
-"""Reusable runtime mechanics for workflow-container projects."""
+"""Validated current-state SQLite storage for workflow-container instances."""
 
-from workflow_container_runtime.state import (
+from workflow_container_runtime.state.sqlite import (
     STATE_DATABASE_FILENAME,
     SqliteStateCommand,
+    SqliteStateReader,
     SqliteStateStore,
     SqliteStateTable,
     state_database_path_get,
@@ -11,6 +12,7 @@ from workflow_container_runtime.state import (
 __all__ = [
     "STATE_DATABASE_FILENAME",
     "SqliteStateCommand",
+    "SqliteStateReader",
     "SqliteStateStore",
     "SqliteStateTable",
     "state_database_path_get",

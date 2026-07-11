@@ -1,6 +1,11 @@
 """Artifact helpers for workflow-container runtime."""
 
 from workflow_container_runtime.artifact.materializer import ArtifactMaterializationPolicy, ArtifactMaterializer
-from workflow_container_runtime.artifact.writer import JsonArtifactWriter
+from workflow_container_runtime.artifact.writer import JsonArtifactWriter, shared_artifact_directory_prepare
 
-__all__ = ["ArtifactMaterializationPolicy", "ArtifactMaterializer", "JsonArtifactWriter"]
+__all__ = [
+    "ArtifactMaterializationPolicy",
+    "ArtifactMaterializer",
+    "JsonArtifactWriter",
+    "shared_artifact_directory_prepare",
+]

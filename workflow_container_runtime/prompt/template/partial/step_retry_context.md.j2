@@ -1,0 +1,11 @@
+Input path:
+{{ input_path }}
+
+{% if previous_attempt_result_path is defined %}Previous attempt result path:
+{{ previous_attempt_result_path }}
+{% endif %}
+{% if previous_attempt_verification_path is defined %}Previous attempt verification path:
+{{ previous_attempt_verification_path }}
+{% endif %}
+
+Read lifecycle data only through the paths routed above. Do not infer diagnostic or output paths; the current attempt output does not exist until this action returns.

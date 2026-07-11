@@ -1,18 +1,16 @@
 """Package smoke tests."""
 
 from pathlib import Path
+import importlib.metadata
 import tomllib
 
 import pytest
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import workflow_container_runtime
-from workflow_container_runtime.stage import BrowserActionResult, BrowsingError
-
-
-def test_package_version_exist() -> None:
-    """Verify the runtime package imports."""
-
-    assert workflow_container_runtime.__version__ == "0.1.0"
+from workflow_container_runtime.model import strict_model_contract_validate
+from workflow_container_runtime.step import BrowserActionResult, BrowsingError
+from workflow_container_runtime.verification import VerificationDecision, VerificationResult
 
 
 def test_setuptools_package_discovery_excludes_tests() -> None:
@@ -24,19 +22,27 @@ def test_setuptools_package_discovery_excludes_tests() -> None:
     assert package_find_payload["include"] == ["workflow_container_runtime*"]
 
 
-def test_stage_browsing_error_validates_text_fields() -> None:
-    """Validate generic browser-backed stage error payload."""
+def test_package_root_does_not_duplicate_distribution_version() -> None:
+    """Keep distribution versioning in installed package metadata only."""
 
-    browsing_error = BrowsingError(error=" timeout ", url=" https://example.test ")
+    assert importlib.metadata.version("workflow-container-runtime") == "0.3.0"
+    assert not hasattr(workflow_container_runtime, "__version__")
+    assert "__version__" not in workflow_container_runtime.__all__
+
+
+def test_browsing_error_validates_exact_text_fields() -> None:
+    """Reject empty or padded browser error fields."""
+
+    browsing_error = BrowsingError(error="timeout", url="https://example.test")
 
     assert browsing_error.error == "timeout"
     assert browsing_error.url == "https://example.test"
 
-    with pytest.raises(ValueError, match="browsing error fields must be non-empty strings"):
+    with pytest.raises(ValueError, match="browsing error fields must be non-empty and trimmed"):
         BrowsingError(error=" ", url="https://example.test")
 
 
-def test_stage_browser_action_result_has_generic_error_list() -> None:
+def test_browser_action_result_has_generic_error_list() -> None:
     """Validate generic browser-only action result payload."""
 
     result = BrowserActionResult(browsing_error_list=[BrowsingError(error="blocked", url="https://example.test")])
@@ -44,3 +50,84 @@ def test_stage_browser_action_result_has_generic_error_list() -> None:
     assert result.model_dump(mode="json") == {
         "browsing_error_list": [{"error": "blocked", "url": "https://example.test"}]
     }
+
+
+def test_runtime_result_models_require_explicit_list_fields() -> None:
+    """Reject omitted verdict feedback and browser failure lists at the runtime boundary."""
+
+    with pytest.raises(ValidationError):
+        BrowserActionResult()
+    with pytest.raises(ValidationError):
+        VerificationDecision(status="success")
+    with pytest.raises(ValidationError):
+        VerificationResult(status="success", feedback_list=[])
+
+
+def test_verification_result_binds_decision_to_exact_canonical_result() -> None:
+    """Bind one transient decision to the canonical validated result payload."""
+
+    class ExampleResult(BaseModel):
+        """Provide one strict result with deterministic canonical JSON."""
+
+        model_config = ConfigDict(extra="forbid", strict=True, validate_assignment=True, validate_default=True)
+
+        output: str
+
+    result = ExampleResult(output="TEXT")
+    decision = VerificationDecision(status="success", feedback_list=[])
+
+    verification = VerificationResult.from_decision(
+        decision=decision,
+        result=result,
+        result_revision_index=2,
+    )
+
+    assert decision.model_dump(mode="json") == {"feedback_list": [], "status": "success"}
+    assert "result_digest" not in VerificationDecision.model_json_schema()["properties"]
+    assert verification.model_dump(mode="json") == {
+        "feedback_list": [],
+        "result_digest": "04f5f40e3bbc9efa2a9ab83622d87501a48dd3d3a164a3e6a1d539de6ba60d49",
+        "result_revision_index": 2,
+        "status": "success",
+    }
+    assert verification.is_bound_to(result, result_revision_index=2)
+    assert not verification.is_bound_to(result, result_revision_index=1)
+    assert not verification.is_bound_to(ExampleResult(output="DIFFERENT"), result_revision_index=2)
+
+    with pytest.raises(ValidationError):
+        VerificationResult(status="success", feedback_list=[], result_digest="", result_revision_index=1)
+
+
+def test_verification_result_revalidates_in_place_mutated_result_before_digest() -> None:
+    """Do not bind a verdict to an invalid result snapshot."""
+
+    class ExampleResult(BaseModel):
+        """Expose one nested collection protected by a field constraint."""
+
+        model_config = ConfigDict(extra="forbid", strict=True, validate_assignment=True, validate_default=True)
+
+        value_list: list[str] = Field(min_length=1)
+
+    result = ExampleResult(value_list=["valid"])
+    result.value_list.clear()
+
+    with pytest.raises(ValidationError):
+        VerificationResult.from_decision(
+            decision=VerificationDecision(status="success", feedback_list=[]),
+            result=result,
+            result_revision_index=1,
+        )
+
+
+def test_strict_model_gate_requires_complete_runtime_configuration() -> None:
+    """Reject strict models that omit assignment or default validation."""
+
+    class IncompleteModel(BaseModel):
+        """Boundary model missing two required validation settings."""
+
+        model_config = ConfigDict(extra="forbid", strict=True)
+
+        value: str
+
+    with pytest.raises(ValueError, match="validate_assignment=True"):
+        strict_model_contract_validate(IncompleteModel(value="value"), model_role="test")
