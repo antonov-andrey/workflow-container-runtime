@@ -4,12 +4,11 @@ import asyncio
 import json
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar, Generic, TypeVar, cast, final
+from typing import ClassVar, Generic, Self, TypeVar, cast, final
 
 from dbos import DBOS
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from workflow_container_runtime.artifact.materializer import ArtifactMaterializer
 from workflow_container_runtime.artifact.writer import JsonArtifactWriter
@@ -56,12 +55,30 @@ class StepResultValidationError(RuntimeError):
         self.feedback_list = feedback_list
 
 
-@dataclass(frozen=True)
-class WorkflowStepInvocationOutcome(Generic[ResultT]):
+class WorkflowStepInvocationOutcome(BaseModel, Generic[ResultT]):
     """Represent one concurrent invocation success or exhausted validation failure."""
 
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, validate_assignment=True, validate_default=True)
+
     result: ResultT | None
-    validation_error: StepResultValidationError | None
+    validation_feedback_list: list[str]
+
+    @model_validator(mode="after")
+    def state_validate(self) -> Self:
+        """Require exactly one public outcome state.
+
+        Returns:
+            Validated success or exhausted-correction outcome.
+
+        Raises:
+            ValueError: If result and validation feedback describe an ambiguous state.
+        """
+
+        if self.result is None and not self.validation_feedback_list:
+            raise ValueError("validation feedback is required when no result is available")
+        if self.result is not None and self.validation_feedback_list:
+            raise ValueError("validation feedback is forbidden when a result is available")
+        return self
 
 
 class WorkflowStepBase(ABC, Generic[InputSourceT, InputT, ResultT]):
@@ -874,8 +891,8 @@ class WorkflowStepCodexConcurrentBase(
 
         outcome_list = await self.run_outcome_list(invocation_list, workflow_step_config)
         for outcome in outcome_list:
-            if outcome.validation_error is not None:
-                raise outcome.validation_error
+            if outcome.validation_feedback_list:
+                raise StepResultValidationError(feedback_list=outcome.validation_feedback_list)
         return [cast(ResultT, outcome.result) for outcome in outcome_list]
 
     @final
@@ -908,12 +925,20 @@ class WorkflowStepCodexConcurrentBase(
         outcome_list: list[WorkflowStepInvocationOutcome[ResultT]] = []
         for result_or_error in result_or_error_list:
             if isinstance(result_or_error, StepResultValidationError):
-                outcome_list.append(WorkflowStepInvocationOutcome(result=None, validation_error=result_or_error))
+                outcome_list.append(
+                    WorkflowStepInvocationOutcome(
+                        result=None,
+                        validation_feedback_list=list(result_or_error.feedback_list),
+                    )
+                )
             elif isinstance(result_or_error, BaseException):
                 raise result_or_error
             else:
                 outcome_list.append(
-                    WorkflowStepInvocationOutcome(result=cast(ResultT, result_or_error), validation_error=None)
+                    WorkflowStepInvocationOutcome(
+                        result=cast(ResultT, result_or_error),
+                        validation_feedback_list=[],
+                    )
                 )
         return outcome_list
 

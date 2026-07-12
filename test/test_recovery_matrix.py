@@ -16,6 +16,7 @@ from workflow_container_runtime.artifact import (
     ArtifactMaterializer,
     JsonArtifactWriter,
 )
+from workflow_container_runtime.codex import CodexExecutionError
 from workflow_container_runtime.prompt.renderer import PromptRenderer
 from workflow_container_runtime.step import (
     CodexExecutionRetryPolicy,
@@ -28,6 +29,7 @@ from workflow_container_runtime.step import (
     WorkflowStepCodexState,
     WorkflowStepExecutionContext,
     WorkflowStepInvocation,
+    WorkflowStepInvocationOutcome,
 )
 from workflow_container_runtime.step.file import input_path_get, result_path_get, state_path_get, verification_path_get
 from workflow_container_runtime.state import SqliteStateStore, SqliteStateTable, state_database_path_get
@@ -368,6 +370,273 @@ def _workflow_context_get(tmp_path: Path, *, instance_key: str) -> WorkflowExecu
         runtime_capability=WorkflowRuntimeCapability(browser=None),
         workflow_instance_dir=tmp_path / "workflow" / instance_key,
     )
+
+
+def _concurrent_step_get(tmp_path: Path) -> RecoveryConcurrentCodexStep:
+    """Build one concurrent step with its ordinary runtime dependencies.
+
+    Args:
+        tmp_path: Test-owned directory for prompt templates.
+
+    Returns:
+        Concurrent step ready for DBOS boundary fakes.
+    """
+
+    return RecoveryConcurrentCodexStep(
+        artifact_materializer=ArtifactMaterializer(),
+        artifact_writer=JsonArtifactWriter(),
+        codex_runner=ScriptedCodexRunner([]),
+        prompt_renderer=PromptRenderer(template_dir=tmp_path / "template"),
+        runtime_policy=RECOVERY_RUNTIME_POLICY,
+    )
+
+
+def _concurrent_config_get() -> RecoveryConcurrentStepConfig:
+    """Build the exact concurrent configuration required by recovery fixtures.
+
+    Returns:
+        Concurrent configuration with a two-invocation scheduler bound.
+    """
+
+    return RecoveryConcurrentStepConfig(
+        concurrency=2,
+        correction_attempt_limit=0,
+        instruction="",
+        model="gpt-5.6-terra",
+        reasoning_effort="high",
+    )
+
+
+def _concurrent_invocation_list_get(
+    context: WorkflowStepExecutionContext,
+    value_list: list[str],
+) -> list[WorkflowStepInvocation[RecoveryStepInputSource]]:
+    """Build independently addressable invocations under one workflow context.
+
+    Args:
+        context: Base step context with one shared workflow identity.
+        value_list: Ordered fake source values and step-instance keys.
+
+    Returns:
+        Invocation list whose contexts differ only by step instance key.
+    """
+
+    return [
+        WorkflowStepInvocation(
+            execution_context=context.model_copy(
+                update={"step_instance_dir": context.step_instance_dir.parent / value}
+            ),
+            input_source=RecoveryStepInputSource(value=value),
+        )
+        for value in value_list
+    ]
+
+
+@pytest.mark.parametrize(
+    ("result", "validation_feedback_list"),
+    [
+        (None, []),
+        (RecoveryStepResult(output="accepted"), ["unexpected feedback"]),
+    ],
+)
+def test_workflow_step_invocation_outcome_rejects_ambiguous_state(
+    result: RecoveryStepResult | None,
+    validation_feedback_list: list[str],
+) -> None:
+    """Require each public concurrent outcome to be either success or correction exhaustion."""
+
+    with pytest.raises(ValueError):
+        WorkflowStepInvocationOutcome(
+            result=result,
+            validation_feedback_list=validation_feedback_list,
+        )
+
+
+def test_codex_concurrent_step_outcome_list_preserves_order_feedback_and_bound(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Keep successful results and exhausted feedback in input order under the scheduler bound."""
+
+    active_count = 0
+    max_active_count = 0
+
+    async def run_step_async(
+        options: dict[str, str],
+        func: object,
+        execution_context: WorkflowStepExecutionContext,
+        input_source: RecoveryStepInputSource,
+        workflow_step_config: RecoveryConcurrentStepConfig,
+    ) -> RecoveryStepResult:
+        """Return one success or exhausted correction after a deliberate completion delay."""
+
+        nonlocal active_count, max_active_count
+        _ = options
+        _ = func
+        _ = execution_context
+        _ = workflow_step_config
+        active_count += 1
+        max_active_count = max(max_active_count, active_count)
+        await asyncio.sleep(0.02 if input_source.value == "first" else 0)
+        active_count -= 1
+        if input_source.value == "invalid":
+            raise StepResultValidationError(feedback_list=["Replace invalid output."])
+        return RecoveryStepResult(output=input_source.value)
+
+    monkeypatch.setattr(DBOS, "run_step_async", run_step_async)
+    outcome_list = asyncio.run(
+        _concurrent_step_get(tmp_path).run_outcome_list(
+            _concurrent_invocation_list_get(_step_context_get(tmp_path), ["first", "invalid", "third"]),
+            _concurrent_config_get(),
+        )
+    )
+
+    assert [outcome.result for outcome in outcome_list] == [
+        RecoveryStepResult(output="first"),
+        None,
+        RecoveryStepResult(output="third"),
+    ]
+    assert [outcome.validation_feedback_list for outcome in outcome_list] == [[], ["Replace invalid output."], []]
+    assert max_active_count == 2
+
+
+def test_codex_concurrent_step_run_list_raises_rebuilt_validation_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Recreate the runtime validation error from public feedback for the ordinary API."""
+
+    async def run_step_async(
+        options: dict[str, str],
+        func: object,
+        execution_context: WorkflowStepExecutionContext,
+        input_source: RecoveryStepInputSource,
+        workflow_step_config: RecoveryConcurrentStepConfig,
+    ) -> RecoveryStepResult:
+        """Raise one exhausted correction through the real scheduler boundary."""
+
+        _ = options
+        _ = func
+        _ = execution_context
+        _ = input_source
+        _ = workflow_step_config
+        raise StepResultValidationError(feedback_list=["Correct this result."])
+
+    monkeypatch.setattr(DBOS, "run_step_async", run_step_async)
+
+    with pytest.raises(StepResultValidationError, match="Correct this result") as error:
+        asyncio.run(
+            _concurrent_step_get(tmp_path).run_list(
+                _concurrent_invocation_list_get(_step_context_get(tmp_path), ["invalid"]),
+                _concurrent_config_get(),
+            )
+        )
+
+    assert error.value.feedback_list == ["Correct this result."]
+
+
+@pytest.mark.parametrize("error_type", [CodexExecutionError, RuntimeError])
+def test_codex_concurrent_step_outcome_list_propagates_infrastructure_error(
+    error_type: type[RuntimeError],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Do not convert non-validation scheduler failures into public outcomes."""
+
+    completed_value_list: list[str] = []
+
+    async def run_step_async(
+        options: dict[str, str],
+        func: object,
+        execution_context: WorkflowStepExecutionContext,
+        input_source: RecoveryStepInputSource,
+        workflow_step_config: RecoveryConcurrentStepConfig,
+    ) -> RecoveryStepResult:
+        """Complete peer work before one planned infrastructure failure propagates."""
+
+        _ = options
+        _ = func
+        _ = execution_context
+        _ = workflow_step_config
+        if input_source.value == "failure":
+            await asyncio.sleep(0)
+            completed_value_list.append(input_source.value)
+            raise error_type("infrastructure failure")
+        await asyncio.sleep(0.01)
+        completed_value_list.append(input_source.value)
+        return RecoveryStepResult(output=input_source.value)
+
+    monkeypatch.setattr(DBOS, "run_step_async", run_step_async)
+
+    with pytest.raises(error_type, match="infrastructure failure"):
+        asyncio.run(
+            _concurrent_step_get(tmp_path).run_outcome_list(
+                _concurrent_invocation_list_get(_step_context_get(tmp_path), ["failure", "completed"]),
+                _concurrent_config_get(),
+            )
+        )
+
+    assert completed_value_list == ["failure", "completed"]
+
+
+@pytest.mark.parametrize("method_name", ["run_list", "run_outcome_list"])
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("empty", "invocation_list must not be empty"),
+        ("config", "workflow_step_config is RecoveryStepConfig"),
+        ("result_dir", "all invocations must use one result_dir"),
+        ("workflow_input_path", "all invocations must use one workflow_input_path"),
+        ("duplicate_step_instance_dir", "invocations must use unique step_instance_dir values"),
+        ("outside_step_instance_dir", "every step_instance_dir must be inside result_dir"),
+    ],
+)
+def test_codex_concurrent_public_methods_validate_invocation_group(
+    case: str,
+    message: str,
+    method_name: str,
+    tmp_path: Path,
+) -> None:
+    """Apply one exact invocation-group contract through both public concurrent methods."""
+
+    context = _step_context_get(tmp_path)
+    invocation_list = _concurrent_invocation_list_get(context, ["first", "second"])
+    workflow_step_config: RecoveryStepConfig | RecoveryConcurrentStepConfig = _concurrent_config_get()
+    if case == "empty":
+        invocation_list = []
+    elif case == "config":
+        workflow_step_config = RECOVERY_STEP_CONFIG
+    elif case == "result_dir":
+        invocation_list[1] = invocation_list[1].model_copy(
+            update={
+                "execution_context": invocation_list[1].execution_context.model_copy(
+                    update={"result_dir": tmp_path / "other"}
+                )
+            }
+        )
+    elif case == "workflow_input_path":
+        invocation_list[1] = invocation_list[1].model_copy(
+            update={
+                "execution_context": invocation_list[1].execution_context.model_copy(
+                    update={"workflow_input_path": Path("workflow/other/input.json")}
+                )
+            }
+        )
+    elif case == "duplicate_step_instance_dir":
+        invocation_list[1] = invocation_list[1].model_copy(
+            update={"execution_context": invocation_list[0].execution_context}
+        )
+    else:
+        invocation_list[1] = invocation_list[1].model_copy(
+            update={
+                "execution_context": invocation_list[1].execution_context.model_copy(
+                    update={"step_instance_dir": tmp_path.parent}
+                )
+            }
+        )
+
+    with pytest.raises((TypeError, ValueError), match=message):
+        asyncio.run(getattr(_concurrent_step_get(tmp_path), method_name)(invocation_list, workflow_step_config))
 
 
 def test_codex_concurrent_step_returns_input_order_with_bounded_dbos_dispatch(
