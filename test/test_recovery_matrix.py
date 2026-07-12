@@ -435,6 +435,75 @@ def test_codex_concurrent_step_returns_input_order_with_bounded_dbos_dispatch(
     assert max_active_count == 2
 
 
+def test_codex_concurrent_step_waits_for_all_work_before_raising_lowest_index_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Raise the lowest-index failure only after every scheduled invocation completes."""
+
+    completed_value_list: list[str] = []
+    started_value_list: list[str] = []
+
+    async def run_step_async(
+        options: dict[str, str],
+        func: object,
+        execution_context: WorkflowStepExecutionContext,
+        input_source: RecoveryStepInputSource,
+        workflow_step_config: RecoveryConcurrentStepConfig,
+    ) -> RecoveryStepResult:
+        """Complete one item after a value-specific delay or raise its planned failure."""
+
+        _ = options
+        _ = func
+        _ = execution_context
+        _ = workflow_step_config
+        started_value_list.append(input_source.value)
+        if input_source.value == "higher_index_failure":
+            await asyncio.sleep(0)
+            completed_value_list.append(input_source.value)
+            raise RuntimeError("higher index failure")
+        if input_source.value == "lower_index_failure":
+            await asyncio.sleep(0.02)
+            completed_value_list.append(input_source.value)
+            raise RuntimeError("lower index failure")
+        await asyncio.sleep(0.01)
+        completed_value_list.append(input_source.value)
+        return RecoveryStepResult(output=input_source.value)
+
+    monkeypatch.setattr(DBOS, "run_step_async", run_step_async)
+    context = _step_context_get(tmp_path)
+    step = RecoveryConcurrentCodexStep(
+        artifact_materializer=ArtifactMaterializer(),
+        artifact_writer=JsonArtifactWriter(),
+        codex_runner=ScriptedCodexRunner([]),
+        prompt_renderer=PromptRenderer(template_dir=tmp_path / "template"),
+        runtime_policy=RECOVERY_RUNTIME_POLICY,
+    )
+    config = RecoveryConcurrentStepConfig(
+        concurrency=3,
+        correction_attempt_limit=0,
+        instruction="",
+        model="gpt-5.6-terra",
+        reasoning_effort="high",
+    )
+    value_list = ["lower_index_failure", "higher_index_failure", "completed"]
+    invocation_list = [
+        WorkflowStepInvocation(
+            execution_context=context.model_copy(
+                update={"step_instance_dir": context.step_instance_dir.parent / value}
+            ),
+            input_source=RecoveryStepInputSource(value=value),
+        )
+        for value in value_list
+    ]
+
+    with pytest.raises(RuntimeError, match="lower index failure"):
+        asyncio.run(step.run_list(invocation_list, config))
+
+    assert started_value_list == value_list
+    assert set(completed_value_list) == set(value_list)
+
+
 def test_workflow_result_without_verdict_is_revalidated_without_republication(tmp_path: Path) -> None:
     """Recover a published workflow result by recreating only its verdict."""
 

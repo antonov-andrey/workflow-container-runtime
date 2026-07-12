@@ -346,11 +346,11 @@ class WorkflowStepCodexBase(
 
         self._step_key_validate()
         self._workflow_step_config_type_validate(workflow_step_config)
-        step_input = self._step_input_get(execution_context, input_source)
         self._workflow_step_config_input_validate(
             execution_context=execution_context,
             workflow_step_config=workflow_step_config,
         )
+        step_input = self._step_input_get(execution_context, input_source)
         return self._lifecycle_run(
             execution_context=execution_context,
             step_input=step_input,

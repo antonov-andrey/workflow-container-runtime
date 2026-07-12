@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from workflow_container_runtime.capability import BrowserRuntimeCapability
+from workflow_container_runtime.step.context import WorkflowStepExecutionContext
 from workflow_container_runtime.workflow.context import WorkflowExecutionContext, WorkflowRuntimeCapability
 
 
@@ -56,6 +57,36 @@ def test_workflow_context_rejects_symlink_escape(tmp_path: Path) -> None:
             result_dir=result_dir,
             runtime_capability=WorkflowRuntimeCapability(browser=None),
             workflow_instance_dir=result_dir / "workflow" / "run",
+        )
+
+
+def test_step_context_rejects_unrelated_workflow_input_path(tmp_path: Path) -> None:
+    """Require a step to bind only the input of its containing workflow instance."""
+
+    with pytest.raises(ValidationError, match="current workflow input"):
+        WorkflowStepExecutionContext(
+            result_dir=tmp_path,
+            runtime_capability=WorkflowRuntimeCapability(browser=None),
+            step_instance_dir=tmp_path / "workflow" / "run" / "step" / "source_discover",
+            workflow_input_path=Path("workflow/unrelated/input.json"),
+        )
+
+
+def test_step_context_rejects_symlinked_workflow_input_escape(tmp_path: Path) -> None:
+    """Reject the expected input path when its file target escapes the result root."""
+
+    outside_input_path = tmp_path.parent / "outside-input.json"
+    outside_input_path.write_text("{}", encoding="utf-8")
+    workflow_instance_dir = tmp_path / "workflow" / "run"
+    workflow_instance_dir.mkdir(parents=True)
+    (workflow_instance_dir / "input.json").symlink_to(outside_input_path)
+
+    with pytest.raises(ValidationError, match="workflow_input_path must resolve inside result_dir"):
+        WorkflowStepExecutionContext(
+            result_dir=tmp_path,
+            runtime_capability=WorkflowRuntimeCapability(browser=None),
+            step_instance_dir=workflow_instance_dir / "step" / "source_discover",
+            workflow_input_path=Path("workflow/run/input.json"),
         )
 
 

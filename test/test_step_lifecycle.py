@@ -302,7 +302,10 @@ def test_codex_step_requires_the_exact_persisted_workflow_config(tmp_path: Path)
     )
 
     with pytest.raises(RuntimeError, match="does not match workflow input"):
-        step.run(_context_get(tmp_path), ExampleInputSource(value="text"), mismatched_config)
+        context = _context_get(tmp_path)
+        step.run(context, ExampleInputSource(value="text"), mismatched_config)
+
+    assert not context.step_instance_dir.exists()
 
 
 def test_codex_step_retries_mechanical_and_semantic_failures(tmp_path: Path) -> None:
