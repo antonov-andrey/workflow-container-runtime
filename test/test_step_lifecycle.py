@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import ClassVar
 
 import pytest
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from workflow_container_runtime.artifact.materializer import ArtifactMaterializationPolicy, ArtifactMaterializer
 from workflow_container_runtime.artifact.writer import JsonArtifactWriter
@@ -304,6 +304,35 @@ def test_codex_step_requires_the_exact_persisted_workflow_config(tmp_path: Path)
     with pytest.raises(RuntimeError, match="does not match workflow input"):
         context = _context_get(tmp_path)
         step.run(context, ExampleInputSource(value="text"), mismatched_config)
+
+    assert not context.step_instance_dir.exists()
+
+
+def test_codex_step_revalidates_model_copy_context_before_step_side_effects(tmp_path: Path) -> None:
+    """Reject a context whose copied workflow input path bypasses its model validator."""
+
+    step = ExampleCodexStep(
+        artifact_materializer=ArtifactMaterializer(),
+        artifact_writer=JsonArtifactWriter(),
+        codex_runner=FakeCodexRunner([]),
+        prompt_renderer=_prompt_renderer_get(tmp_path / "template"),
+        runtime_policy=EXAMPLE_RUNTIME_POLICY,
+    )
+    context = _context_get(tmp_path)
+    JsonArtifactWriter().write(
+        tmp_path / "foreign" / "input.json",
+        ExampleWorkflowInput(
+            config=ExampleWorkflowConfig(
+                instruction="",
+                step_map=ExampleStepConfigMap(example_build=EXAMPLE_STEP_CONFIG),
+            ),
+            request=ExampleInputSource(value="foreign"),
+        ),
+    )
+    unvalidated_context = context.model_copy(update={"workflow_input_path": Path("foreign/input.json")})
+
+    with pytest.raises(ValidationError, match="current workflow input"):
+        step.run(unvalidated_context, ExampleInputSource(value="text"), EXAMPLE_STEP_CONFIG)
 
     assert not context.step_instance_dir.exists()
 

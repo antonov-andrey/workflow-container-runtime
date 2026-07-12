@@ -344,6 +344,7 @@ class WorkflowStepCodexBase(
             Accepted public step result.
         """
 
+        execution_context = WorkflowStepExecutionContext.model_validate(execution_context.model_dump(mode="python"))
         self._step_key_validate()
         self._workflow_step_config_type_validate(workflow_step_config)
         self._workflow_step_config_input_validate(
