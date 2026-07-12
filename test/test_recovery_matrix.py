@@ -596,6 +596,60 @@ def test_codex_concurrent_step_outcome_list_propagates_infrastructure_error(
     assert completed_value_list == ["failure", "completed"]
 
 
+@pytest.mark.parametrize("error_type", [CodexExecutionError, RuntimeError])
+@pytest.mark.parametrize("method_name", ["run_list", "run_outcome_list"])
+def test_codex_concurrent_public_methods_prioritize_infrastructure_error_over_validation_outcome(
+    error_type: type[RuntimeError],
+    method_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Finish the mixed group and raise its infrastructure failure instead of an earlier validation outcome."""
+
+    completed_value_list: list[str] = []
+    started_value_list: list[str] = []
+
+    async def run_step_async(
+        options: dict[str, str],
+        func: object,
+        execution_context: WorkflowStepExecutionContext,
+        input_source: RecoveryStepInputSource,
+        workflow_step_config: RecoveryConcurrentStepConfig,
+    ) -> RecoveryStepResult:
+        """Complete one peer, exhaust one validation, or raise one planned infrastructure failure."""
+
+        _ = options
+        _ = func
+        _ = execution_context
+        _ = workflow_step_config
+        started_value_list.append(input_source.value)
+        if input_source.value == "validation":
+            await asyncio.sleep(0.02)
+            completed_value_list.append(input_source.value)
+            raise StepResultValidationError(feedback_list=["Correct the result."])
+        if input_source.value == "infrastructure":
+            await asyncio.sleep(0)
+            completed_value_list.append(input_source.value)
+            raise error_type("infrastructure failure")
+        await asyncio.sleep(0.01)
+        completed_value_list.append(input_source.value)
+        return RecoveryStepResult(output=input_source.value)
+
+    value_list = ["validation", "infrastructure", "success"]
+    monkeypatch.setattr(DBOS, "run_step_async", run_step_async)
+
+    with pytest.raises(error_type, match="infrastructure failure"):
+        asyncio.run(
+            getattr(_concurrent_step_get(tmp_path), method_name)(
+                _concurrent_invocation_list_get(_step_context_get(tmp_path), value_list),
+                _concurrent_config_get(),
+            )
+        )
+
+    assert started_value_list == value_list
+    assert set(completed_value_list) == set(value_list)
+
+
 @pytest.mark.parametrize("method_name", ["run_list", "run_outcome_list"])
 @pytest.mark.parametrize(
     ("case", "message"),

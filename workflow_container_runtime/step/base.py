@@ -886,7 +886,8 @@ class WorkflowStepCodexConcurrentBase(
 
         Raises:
             ValueError: If invocation contexts do not describe one concurrent group.
-            BaseException: The lowest-index invocation error after all work completes.
+            BaseException: The lowest-index non-validation error after all work completes, or the lowest-index
+                validation error when no non-validation error occurs.
         """
 
         outcome_list = await self.run_outcome_list(invocation_list, workflow_step_config)
