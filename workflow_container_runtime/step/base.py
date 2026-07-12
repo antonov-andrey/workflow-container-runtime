@@ -61,7 +61,7 @@ class WorkflowStepInvocationOutcome(BaseModel, Generic[ResultT]):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True, validate_assignment=True, validate_default=True)
 
     result: ResultT | None
-    validation_feedback_list: list[str]
+    validation_feedback_tuple: tuple[str, ...]
 
     @model_validator(mode="after")
     def state_validate(self) -> Self:
@@ -74,9 +74,9 @@ class WorkflowStepInvocationOutcome(BaseModel, Generic[ResultT]):
             ValueError: If result and validation feedback describe an ambiguous state.
         """
 
-        if self.result is None and not self.validation_feedback_list:
+        if self.result is None and not self.validation_feedback_tuple:
             raise ValueError("validation feedback is required when no result is available")
-        if self.result is not None and self.validation_feedback_list:
+        if self.result is not None and self.validation_feedback_tuple:
             raise ValueError("validation feedback is forbidden when a result is available")
         return self
 
@@ -891,8 +891,8 @@ class WorkflowStepCodexConcurrentBase(
 
         outcome_list = await self.run_outcome_list(invocation_list, workflow_step_config)
         for outcome in outcome_list:
-            if outcome.validation_feedback_list:
-                raise StepResultValidationError(feedback_list=outcome.validation_feedback_list)
+            if outcome.validation_feedback_tuple:
+                raise StepResultValidationError(feedback_list=list(outcome.validation_feedback_tuple))
         return [cast(ResultT, outcome.result) for outcome in outcome_list]
 
     @final
@@ -928,7 +928,7 @@ class WorkflowStepCodexConcurrentBase(
                 outcome_list.append(
                     WorkflowStepInvocationOutcome(
                         result=None,
-                        validation_feedback_list=list(result_or_error.feedback_list),
+                        validation_feedback_tuple=tuple(result_or_error.feedback_list),
                     )
                 )
             elif isinstance(result_or_error, BaseException):
@@ -937,7 +937,7 @@ class WorkflowStepCodexConcurrentBase(
                 outcome_list.append(
                     WorkflowStepInvocationOutcome(
                         result=cast(ResultT, result_or_error),
-                        validation_feedback_list=[],
+                        validation_feedback_tuple=(),
                     )
                 )
         return outcome_list

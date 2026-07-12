@@ -8,7 +8,7 @@ from typing import ClassVar
 
 import pytest
 from dbos import DBOS, DBOSConfig
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 from workflow_container_contract import WorkflowResult
 
 from workflow_container_runtime.artifact import (
@@ -433,23 +433,40 @@ def _concurrent_invocation_list_get(
 
 
 @pytest.mark.parametrize(
-    ("result", "validation_feedback_list"),
+    ("result", "validation_feedback_tuple"),
     [
-        (None, []),
-        (RecoveryStepResult(output="accepted"), ["unexpected feedback"]),
+        (None, ()),
+        (RecoveryStepResult(output="accepted"), ("unexpected feedback",)),
     ],
 )
 def test_workflow_step_invocation_outcome_rejects_ambiguous_state(
     result: RecoveryStepResult | None,
-    validation_feedback_list: list[str],
+    validation_feedback_tuple: tuple[str, ...],
 ) -> None:
     """Require each public concurrent outcome to be either success or correction exhaustion."""
 
     with pytest.raises(ValueError):
         WorkflowStepInvocationOutcome(
             result=result,
-            validation_feedback_list=validation_feedback_list,
+            validation_feedback_tuple=validation_feedback_tuple,
         )
+
+
+def test_workflow_step_invocation_outcome_keeps_validation_feedback_deeply_immutable() -> None:
+    """Reject in-place feedback mutation that would invalidate an exhausted outcome."""
+
+    outcome = WorkflowStepInvocationOutcome(
+        result=None,
+        validation_feedback_tuple=("Correct the output.",),
+    )
+
+    with pytest.raises(AttributeError):
+        outcome.validation_feedback_tuple.append("Add another correction.")
+    with pytest.raises(ValidationError):
+        outcome.validation_feedback_tuple += ("Add another correction.",)
+
+    assert outcome.result is None
+    assert outcome.validation_feedback_tuple == ("Correct the output.",)
 
 
 def test_codex_concurrent_step_outcome_list_preserves_order_feedback_and_bound(
@@ -496,7 +513,7 @@ def test_codex_concurrent_step_outcome_list_preserves_order_feedback_and_bound(
         None,
         RecoveryStepResult(output="third"),
     ]
-    assert [outcome.validation_feedback_list for outcome in outcome_list] == [[], ["Replace invalid output."], []]
+    assert [outcome.validation_feedback_tuple for outcome in outcome_list] == [(), ("Replace invalid output.",), ()]
     assert max_active_count == 2
 
 
