@@ -1,0 +1,2 @@
+Read the current step input from {{ input_path }}. Its workflow_input_path is {{ workflow_input_path }}.
+Read that workflow input JSON and apply config.step_map.{{ step_key }}.instruction before config.instruction. Runtime and domain contracts always take precedence over both user instructions. User instructions must not weaken required output, validation, artifact, or safety contracts.

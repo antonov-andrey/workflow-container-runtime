@@ -55,7 +55,6 @@ class CodexRunner:
         self,
         *,
         artifact_writer: JsonArtifactWriter,
-        config: CodexRunnerConfig,
         prompt_renderer: PromptRenderer,
         workflow_container_name: str,
     ) -> None:
@@ -63,19 +62,18 @@ class CodexRunner:
 
         Args:
             artifact_writer: JSON artifact writer used for schema diagnostics.
-            config: Explicit model and reasoning selection.
             prompt_renderer: Runtime system-prompt renderer.
             workflow_container_name: Human-readable workflow container name for Codex system prompts.
         """
 
         self._artifact_writer = artifact_writer
-        self._config = config
         self._prompt_renderer = prompt_renderer
         self._workflow_container_name = workflow_container_name
 
     def run(
         self,
         *,
+        config: CodexRunnerConfig,
         diagnostic_dir: Path,
         output_model: type[OutputT],
         prompt: str,
@@ -86,6 +84,7 @@ class CodexRunner:
         """Run one low-level Codex action with bounded transport retries.
 
         Args:
+            config: Explicit model and reasoning selection for this call.
             diagnostic_dir: Deterministic base directory for this action's diagnostics.
             output_model: Pydantic model class for the structured response.
             prompt: Action prompt text.
@@ -107,6 +106,7 @@ class CodexRunner:
             try:
                 return self._attempt_run(
                     browser_runtime_mcp_url=browser_runtime_mcp_url,
+                    config=config,
                     diagnostic_dir=diagnostic_dir / f"attempt_{attempt_index:03d}",
                     output_model=output_model,
                     prompt=prompt,
@@ -122,6 +122,7 @@ class CodexRunner:
         self,
         *,
         browser_runtime_mcp_url: str,
+        config: CodexRunnerConfig,
         diagnostic_dir: Path,
         output_model: type[OutputT],
         prompt: str,
@@ -131,6 +132,7 @@ class CodexRunner:
 
         Args:
             browser_runtime_mcp_url: Configured browser runtime endpoint, when available.
+            config: Explicit model and reasoning selection for this call.
             diagnostic_dir: Directory that owns this exact attempt's diagnostics.
             output_model: Pydantic model class for the structured response.
             prompt: Action prompt text.
@@ -159,6 +161,7 @@ class CodexRunner:
         prompt_path.write_text(f"{system_prompt}\n\n{prompt}\n", encoding="utf-8")
         command = self._command_list_get(
             browser_runtime_mcp_url=browser_runtime_mcp_url,
+            config=config,
             output_path=output_path,
             working_directory=working_directory,
             schema_path=schema_path,
@@ -327,6 +330,7 @@ class CodexRunner:
         self,
         *,
         browser_runtime_mcp_url: str,
+        config: CodexRunnerConfig,
         output_path: Path,
         working_directory: Path,
         schema_path: Path,
@@ -335,6 +339,7 @@ class CodexRunner:
 
         Args:
             browser_runtime_mcp_url: Browser/VPN runtime MCP URL.
+            config: Explicit model and reasoning selection for this call.
             output_path: Final Codex message output path.
             working_directory: Root directory used as Codex working directory.
             schema_path: Structured output schema path.
@@ -347,7 +352,7 @@ class CodexRunner:
             "codex",
             "exec",
             "--model",
-            self._config.model,
+            config.model,
             "--output-schema",
             str(schema_path),
             "--output-last-message",
@@ -359,7 +364,7 @@ class CodexRunner:
             "-c",
             'approval_policy="never"',
             "-c",
-            f'model_reasoning_effort="{self._config.model_reasoning_effort}"',
+            f'model_reasoning_effort="{config.reasoning_effort}"',
             "--ignore-rules",
             "--skip-git-repo-check",
             "--cd",

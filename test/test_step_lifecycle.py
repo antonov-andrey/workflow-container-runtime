@@ -1,5 +1,6 @@
 """Behavior tests for deterministic and Codex-backed workflow steps."""
 
+import inspect
 from pathlib import Path
 from typing import ClassVar
 
@@ -8,20 +9,25 @@ from pydantic import BaseModel, ConfigDict
 
 from workflow_container_runtime.artifact.materializer import ArtifactMaterializationPolicy, ArtifactMaterializer
 from workflow_container_runtime.artifact.writer import JsonArtifactWriter
+from workflow_container_runtime.codex.config import CodexRunnerConfig
 from workflow_container_runtime.prompt.renderer import PromptRenderer
 from workflow_container_runtime.step.base import (
     StepResultValidationError,
+    WorkflowStepBase,
+    WorkflowStepCodexConcurrentBase,
     WorkflowStepCodexBase,
     WorkflowStepDeterministicBase,
 )
 from workflow_container_runtime.step.codex import (
     CodexExecutionRetryPolicy,
-    WorkflowStepCodexConfig,
+    WorkflowStepCodexConfigBase,
+    WorkflowStepCodexRuntimePolicy,
     WorkflowStepCodexState,
 )
 from workflow_container_runtime.step.context import WorkflowStepExecutionContext
 from workflow_container_runtime.step.file import input_path_get, result_path_get, state_path_get, verification_path_get
 from workflow_container_runtime.verification import VerificationDecision, VerificationResult
+from workflow_container_runtime.workflow import WorkflowConfigBase, WorkflowInputBase
 from workflow_container_runtime.workflow.context import WorkflowRuntimeCapability
 
 
@@ -41,6 +47,27 @@ class ExampleStepInput(ExampleModel):
     """Persisted step input."""
 
     source: ExampleInputSource
+    workflow_input_path: Path
+
+
+class ExampleStepConfig(WorkflowStepCodexConfigBase):
+    """Provide the exact configurable run contract of the example step."""
+
+
+class ExampleStepConfigMap(ExampleModel):
+    """Expose the closed configurable-step map of the example workflow."""
+
+    example_build: ExampleStepConfig
+
+
+class ExampleWorkflowConfig(WorkflowConfigBase):
+    """Provide one complete workflow config with the example step selection."""
+
+    step_map: ExampleStepConfigMap
+
+
+class ExampleWorkflowInput(WorkflowInputBase[ExampleInputSource, ExampleWorkflowConfig]):
+    """Bind the example request and complete workflow configuration."""
 
 
 class ExampleActionOutput(ExampleModel):
@@ -73,8 +100,7 @@ class ExampleDeterministicStep(WorkflowStepDeterministicBase[ExampleInputSource,
     ) -> ExampleStepInput:
         """Build the persisted input."""
 
-        _ = execution_context
-        return ExampleStepInput(source=input_source)
+        return ExampleStepInput(source=input_source, workflow_input_path=execution_context.workflow_input_path)
 
     def result_build(
         self,
@@ -100,6 +126,7 @@ class FakeCodexRunner:
     def run(
         self,
         *,
+        config: object,
         diagnostic_dir: Path,
         output_model: type[BaseModel],
         prompt: str,
@@ -111,6 +138,7 @@ class FakeCodexRunner:
 
         self.call_list.append(
             {
+                "config": config,
                 "diagnostic_dir": diagnostic_dir,
                 "output_model": output_model,
                 "prompt": prompt,
@@ -123,11 +151,14 @@ class FakeCodexRunner:
 
 
 class ExampleCodexStep(
-    WorkflowStepCodexBase[ExampleInputSource, ExampleStepInput, ExampleActionOutput, ExampleStepResult]
+    WorkflowStepCodexBase[
+        ExampleInputSource, ExampleStepInput, ExampleStepConfig, ExampleActionOutput, ExampleStepResult
+    ]
 ):
     """Build one semantically verified Codex result."""
 
     action_output_model: ClassVar[type[ExampleActionOutput]] = ExampleActionOutput
+    config_model: ClassVar[type[ExampleStepConfig]] = ExampleStepConfig
     result_model: ClassVar[type[ExampleStepResult]] = ExampleStepResult
     state_model: ClassVar[type[WorkflowStepCodexState]] = WorkflowStepCodexState
     step_key: ClassVar[str] = "example_build"
@@ -139,8 +170,7 @@ class ExampleCodexStep(
     ) -> ExampleStepInput:
         """Build the persisted input."""
 
-        _ = execution_context
-        return ExampleStepInput(source=input_source)
+        return ExampleStepInput(source=input_source, workflow_input_path=execution_context.workflow_input_path)
 
     def result_from_action_build(
         self,
@@ -168,13 +198,37 @@ class ExampleCodexStep(
             raise StepResultValidationError(feedback_list=["Replace bad output."])
 
 
+EXAMPLE_STEP_CONFIG = ExampleStepConfig(
+    correction_attempt_limit=2,
+    instruction="",
+    model="gpt-5.6-terra",
+    reasoning_effort="high",
+)
+EXAMPLE_RUNTIME_POLICY = WorkflowStepCodexRuntimePolicy(
+    artifact_materialization_policy=ArtifactMaterializationPolicy(artifact_root_tuple=()),
+    execution_retry_policy=CodexExecutionRetryPolicy(attempt_limit=1),
+)
+
+
 def _context_get(tmp_path: Path) -> WorkflowStepExecutionContext:
     """Return one step execution context."""
 
+    workflow_instance_dir = tmp_path / "workflow" / "run"
+    JsonArtifactWriter().write(
+        input_path_get(workflow_instance_dir),
+        ExampleWorkflowInput(
+            config=ExampleWorkflowConfig(
+                instruction="",
+                step_map=ExampleStepConfigMap(example_build=EXAMPLE_STEP_CONFIG),
+            ),
+            request=ExampleInputSource(value="workflow"),
+        ),
+    )
     return WorkflowStepExecutionContext(
         result_dir=tmp_path,
         runtime_capability=WorkflowRuntimeCapability(browser=None),
-        step_instance_dir=tmp_path / "workflow" / "run" / "step" / "example_build",
+        step_instance_dir=workflow_instance_dir / "step" / "example_build",
+        workflow_input_path=Path("workflow/run/input.json"),
     )
 
 
@@ -208,6 +262,49 @@ def test_deterministic_step_recovers_result_without_rebuilding(tmp_path: Path) -
     assert not state_path_get(context.step_instance_dir).exists()
 
 
+def test_step_bases_expose_only_their_exact_final_run_contracts() -> None:
+    """Keep deterministic, Codex, and concurrent step entrypoints distinct."""
+
+    assert "run" not in WorkflowStepBase.__dict__
+    assert list(inspect.signature(WorkflowStepDeterministicBase.run).parameters) == [
+        "self",
+        "execution_context",
+        "input_source",
+    ]
+    assert list(inspect.signature(WorkflowStepCodexBase.run).parameters) == [
+        "self",
+        "execution_context",
+        "input_source",
+        "workflow_step_config",
+    ]
+    assert list(inspect.signature(WorkflowStepCodexConcurrentBase.run_list).parameters) == [
+        "self",
+        "invocation_list",
+        "workflow_step_config",
+    ]
+
+
+def test_codex_step_requires_the_exact_persisted_workflow_config(tmp_path: Path) -> None:
+    """Reject a DBOS config argument that differs from the workflow input selection."""
+
+    step = ExampleCodexStep(
+        artifact_materializer=ArtifactMaterializer(),
+        artifact_writer=JsonArtifactWriter(),
+        codex_runner=FakeCodexRunner([]),
+        prompt_renderer=_prompt_renderer_get(tmp_path / "template"),
+        runtime_policy=EXAMPLE_RUNTIME_POLICY,
+    )
+    mismatched_config = ExampleStepConfig(
+        correction_attempt_limit=1,
+        instruction="",
+        model="gpt-5.6-terra",
+        reasoning_effort="high",
+    )
+
+    with pytest.raises(RuntimeError, match="does not match workflow input"):
+        step.run(_context_get(tmp_path), ExampleInputSource(value="text"), mismatched_config)
+
+
 def test_codex_step_retries_mechanical_and_semantic_failures(tmp_path: Path) -> None:
     """Use one correction FSM for mechanical and semantic feedback."""
 
@@ -224,16 +321,12 @@ def test_codex_step_retries_mechanical_and_semantic_failures(tmp_path: Path) -> 
         artifact_materializer=ArtifactMaterializer(),
         artifact_writer=JsonArtifactWriter(),
         codex_runner=fake_runner,
-        config=WorkflowStepCodexConfig(
-            artifact_materialization_policy=ArtifactMaterializationPolicy(artifact_root_tuple=()),
-            attempt_limit=3,
-            execution_retry_policy=CodexExecutionRetryPolicy(attempt_limit=1),
-        ),
         prompt_renderer=_prompt_renderer_get(tmp_path / "template"),
+        runtime_policy=EXAMPLE_RUNTIME_POLICY,
     )
     context = _context_get(tmp_path)
 
-    result = step.run(context, ExampleInputSource(value="text"))
+    result = step.run(context, ExampleInputSource(value="text"), EXAMPLE_STEP_CONFIG)
 
     assert result == ExampleStepResult(output="final")
     assert WorkflowStepCodexState.model_validate_json(
@@ -247,6 +340,10 @@ def test_codex_step_retries_mechanical_and_semantic_failures(tmp_path: Path) -> 
         result_revision_index=3,
     )
     assert len(fake_runner.call_list) == 5
+    assert all(
+        call["config"] == CodexRunnerConfig(model="gpt-5.6-terra", reasoning_effort="high")
+        for call in fake_runner.call_list
+    )
 
 
 def test_codex_step_recovers_success_without_external_call(tmp_path: Path) -> None:
@@ -259,18 +356,14 @@ def test_codex_step_recovers_success_without_external_call(tmp_path: Path) -> No
         artifact_materializer=ArtifactMaterializer(),
         artifact_writer=JsonArtifactWriter(),
         codex_runner=fake_runner,
-        config=WorkflowStepCodexConfig(
-            artifact_materialization_policy=ArtifactMaterializationPolicy(artifact_root_tuple=()),
-            attempt_limit=2,
-            execution_retry_policy=CodexExecutionRetryPolicy(attempt_limit=1),
-        ),
         prompt_renderer=_prompt_renderer_get(tmp_path / "template"),
+        runtime_policy=EXAMPLE_RUNTIME_POLICY,
     )
     context = _context_get(tmp_path)
     input_source = ExampleInputSource(value="text")
 
-    assert step.run(context, input_source) == ExampleStepResult(output="final")
-    assert step.run(context, input_source) == ExampleStepResult(output="final")
+    assert step.run(context, input_source, EXAMPLE_STEP_CONFIG) == ExampleStepResult(output="final")
+    assert step.run(context, input_source, EXAMPLE_STEP_CONFIG) == ExampleStepResult(output="final")
     assert len(fake_runner.call_list) == 2
 
 
@@ -298,16 +391,15 @@ def test_step_rejects_missing_input_for_started_instance(
             artifact_materializer=ArtifactMaterializer(),
             artifact_writer=JsonArtifactWriter(),
             codex_runner=FakeCodexRunner([]),
-            config=WorkflowStepCodexConfig(
-                artifact_materialization_policy=ArtifactMaterializationPolicy(artifact_root_tuple=()),
-                attempt_limit=1,
-                execution_retry_policy=CodexExecutionRetryPolicy(attempt_limit=1),
-            ),
             prompt_renderer=_prompt_renderer_get(tmp_path / "template"),
+            runtime_policy=EXAMPLE_RUNTIME_POLICY,
         )
 
     with pytest.raises(RuntimeError):
-        step.run(context, ExampleInputSource(value="text"))
+        if step_kind == "deterministic":
+            step.run(context, ExampleInputSource(value="text"))
+        else:
+            step.run(context, ExampleInputSource(value="text"), EXAMPLE_STEP_CONFIG)
 
     assert not input_path_get(context.step_instance_dir).exists()
     assert existing_path.read_text(encoding="utf-8") == "existing\n"
@@ -351,7 +443,7 @@ def test_deterministic_step_keeps_previous_verdict_while_publishing_result(tmp_p
     context.step_instance_dir.mkdir(parents=True)
     writer.write(
         input_path_get(context.step_instance_dir),
-        ExampleStepInput(source=ExampleInputSource(value="text")),
+        ExampleStepInput(source=ExampleInputSource(value="text"), workflow_input_path=context.workflow_input_path),
     )
     writer.write(
         verification_path_get(context.step_instance_dir),
@@ -399,7 +491,7 @@ def test_codex_step_keeps_previous_verdict_while_publishing_result(tmp_path: Pat
     context.step_instance_dir.mkdir(parents=True)
     writer.write(
         input_path_get(context.step_instance_dir),
-        ExampleStepInput(source=ExampleInputSource(value="text")),
+        ExampleStepInput(source=ExampleInputSource(value="text"), workflow_input_path=context.workflow_input_path),
     )
     writer.write(
         verification_path_get(context.step_instance_dir),
@@ -420,15 +512,11 @@ def test_codex_step_keeps_previous_verdict_while_publishing_result(tmp_path: Pat
         codex_runner=FakeCodexRunner(
             [ExampleActionOutput(output="final"), VerificationDecision(status="success", feedback_list=[])]
         ),
-        config=WorkflowStepCodexConfig(
-            artifact_materialization_policy=ArtifactMaterializationPolicy(artifact_root_tuple=()),
-            attempt_limit=2,
-            execution_retry_policy=CodexExecutionRetryPolicy(attempt_limit=1),
-        ),
         prompt_renderer=_prompt_renderer_get(tmp_path / "template"),
+        runtime_policy=EXAMPLE_RUNTIME_POLICY,
     )
 
-    step.run(context, ExampleInputSource(value="text"))
+    step.run(context, ExampleInputSource(value="text"), EXAMPLE_STEP_CONFIG)
 
     assert VerificationResult.model_validate_json(
         verification_path_get(context.step_instance_dir).read_text(encoding="utf-8")
@@ -541,23 +629,19 @@ def test_codex_step_restarts_verification_after_result_publication_without_repea
         artifact_materializer=ArtifactMaterializer(),
         artifact_writer=CrashAfterResultWriter(),
         codex_runner=fake_runner,
-        config=WorkflowStepCodexConfig(
-            artifact_materialization_policy=ArtifactMaterializationPolicy(artifact_root_tuple=()),
-            attempt_limit=2,
-            execution_retry_policy=CodexExecutionRetryPolicy(attempt_limit=1),
-        ),
         prompt_renderer=_prompt_renderer_get(tmp_path / "template"),
+        runtime_policy=EXAMPLE_RUNTIME_POLICY,
     )
     step.result_from_action_build_count = 0
     context = _context_get(tmp_path)
     input_source = ExampleInputSource(value="text")
 
     with pytest.raises(RuntimeError, match="injected post-result crash"):
-        step.run(context, input_source)
+        step.run(context, input_source, EXAMPLE_STEP_CONFIG)
 
     assert result_path_get(context.step_instance_dir).is_file()
     assert not verification_path_get(context.step_instance_dir).exists()
-    assert step.run(context, input_source) == ExampleStepResult(output="final")
+    assert step.run(context, input_source, EXAMPLE_STEP_CONFIG) == ExampleStepResult(output="final")
     assert step.result_from_action_build_count == 1
     assert len(fake_runner.call_list) == 2
 
@@ -583,7 +667,7 @@ def test_step_rejects_result_with_wrong_declared_model(tmp_path: Path) -> None:
             """Build the persisted input."""
 
             _ = execution_context
-            return ExampleStepInput(source=input_source)
+            return ExampleStepInput(source=input_source, workflow_input_path=execution_context.workflow_input_path)
 
         def result_build(
             self,
@@ -635,13 +719,9 @@ def test_codex_step_rejects_state_with_wrong_declared_model(tmp_path: Path) -> N
         artifact_materializer=ArtifactMaterializer(),
         artifact_writer=JsonArtifactWriter(),
         codex_runner=FakeCodexRunner([]),
-        config=WorkflowStepCodexConfig(
-            artifact_materialization_policy=ArtifactMaterializationPolicy(artifact_root_tuple=()),
-            attempt_limit=1,
-            execution_retry_policy=CodexExecutionRetryPolicy(attempt_limit=1),
-        ),
         prompt_renderer=_prompt_renderer_get(tmp_path / "template"),
+        runtime_policy=EXAMPLE_RUNTIME_POLICY,
     )
 
     with pytest.raises(TypeError, match="state_build returned OtherStepState; expected WorkflowStepCodexState"):
-        step.run(_context_get(tmp_path), ExampleInputSource(value="text"))
+        step.run(_context_get(tmp_path), ExampleInputSource(value="text"), EXAMPLE_STEP_CONFIG)

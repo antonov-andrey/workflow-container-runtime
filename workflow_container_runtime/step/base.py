@@ -1,18 +1,28 @@
 """Durable deterministic and Codex-backed step lifecycles."""
 
+import asyncio
+import json
+
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import ClassVar, Generic, TypeVar, cast, final
 
+from dbos import DBOS
 from pydantic import BaseModel
 
 from workflow_container_runtime.artifact.materializer import ArtifactMaterializer
 from workflow_container_runtime.artifact.writer import JsonArtifactWriter
+from workflow_container_runtime.codex.config import CodexRunnerConfig
 from workflow_container_runtime.codex.runner import CodexRunner
 from workflow_container_runtime.model import model_snapshot_get, strict_model_contract_validate
 from workflow_container_runtime.prompt.renderer import PromptRenderer
-from workflow_container_runtime.step.codex import WorkflowStepCodexConfig, WorkflowStepCodexState
-from workflow_container_runtime.step.context import WorkflowStepExecutionContext
+from workflow_container_runtime.step.codex import (
+    WorkflowStepCodexConcurrentConfigBase,
+    WorkflowStepCodexConfigBase,
+    WorkflowStepCodexRuntimePolicy,
+    WorkflowStepCodexState,
+)
+from workflow_container_runtime.step.context import WorkflowStepExecutionContext, WorkflowStepInvocation
 from workflow_container_runtime.step.file import input_path_get, result_path_get, state_path_get, verification_path_get
 from workflow_container_runtime.verification import VerificationDecision, VerificationResult
 
@@ -20,6 +30,10 @@ ActionOutputT = TypeVar("ActionOutputT", bound=BaseModel)
 InputSourceT = TypeVar("InputSourceT", bound=BaseModel)
 InputT = TypeVar("InputT", bound=BaseModel)
 ResultT = TypeVar("ResultT", bound=BaseModel)
+WorkflowStepCodexConfigT = TypeVar("WorkflowStepCodexConfigT", bound=WorkflowStepCodexConfigBase)
+WorkflowStepCodexConcurrentConfigT = TypeVar(
+    "WorkflowStepCodexConcurrentConfigT", bound=WorkflowStepCodexConcurrentConfigBase
+)
 
 
 class StepResultValidationError(RuntimeError):
@@ -42,7 +56,7 @@ class StepResultValidationError(RuntimeError):
 
 
 class WorkflowStepBase(ABC, Generic[InputSourceT, InputT, ResultT]):
-    """Own immutable input publication and dispatch one step lifecycle."""
+    """Own immutable input publication shared by distinct step lifecycles."""
 
     result_model: ClassVar[type[ResultT]]
 
@@ -55,20 +69,19 @@ class WorkflowStepBase(ABC, Generic[InputSourceT, InputT, ResultT]):
 
         self._artifact_writer = artifact_writer
 
-    @final
-    def run(
+    def _step_input_get(
         self,
         execution_context: WorkflowStepExecutionContext,
         input_source: InputSourceT,
-    ) -> ResultT:
-        """Publish input and execute or recover the concrete lifecycle.
+    ) -> InputT:
+        """Publish and return immutable public input for one step.
 
         Args:
             execution_context: Current step execution context.
             input_source: Public dependencies selected by the DBOS wrapper.
 
         Returns:
-            Accepted public step result.
+            Accepted public step input.
         """
 
         strict_model_contract_validate(input_source, model_role="step input source")
@@ -78,7 +91,7 @@ class WorkflowStepBase(ABC, Generic[InputSourceT, InputT, ResultT]):
         strict_model_contract_validate(step_input, model_role="step input")
         step_input = model_snapshot_get(step_input)
         self._input_publish(execution_context=execution_context, step_input=step_input)
-        return self._lifecycle_run(execution_context=execution_context, step_input=step_input)
+        return step_input
 
     def artifact_prepare(
         self,
@@ -128,15 +141,6 @@ class WorkflowStepBase(ABC, Generic[InputSourceT, InputT, ResultT]):
         _ = execution_context
         _ = step_input
         _ = result
-
-    @abstractmethod
-    def _lifecycle_run(
-        self,
-        *,
-        execution_context: WorkflowStepExecutionContext,
-        step_input: InputT,
-    ) -> ResultT:
-        """Execute or recover the concrete step lifecycle."""
 
     def _input_publish(self, *, execution_context: WorkflowStepExecutionContext, step_input: InputT) -> None:
         """Publish immutable input or verify the existing identity.
@@ -201,6 +205,25 @@ class WorkflowStepDeterministicBase(
     Generic[InputSourceT, InputT, ResultT],
 ):
     """Own publication, validation, and recovery for deterministic work."""
+
+    @final
+    def run(
+        self,
+        execution_context: WorkflowStepExecutionContext,
+        input_source: InputSourceT,
+    ) -> ResultT:
+        """Publish input and execute or recover one deterministic step.
+
+        Args:
+            execution_context: Current step execution context.
+            input_source: Public dependencies selected by the DBOS wrapper.
+
+        Returns:
+            Accepted public step result.
+        """
+
+        step_input = self._step_input_get(execution_context, input_source)
+        return self._lifecycle_run(execution_context=execution_context, step_input=step_input)
 
     @abstractmethod
     def result_build(
@@ -269,11 +292,12 @@ class WorkflowStepDeterministicBase(
 
 class WorkflowStepCodexBase(
     WorkflowStepBase[InputSourceT, InputT, ResultT],
-    Generic[InputSourceT, InputT, ActionOutputT, ResultT],
+    Generic[InputSourceT, InputT, WorkflowStepCodexConfigT, ActionOutputT, ResultT],
 ):
     """Own Codex action attempts, verification, correction, and recovery."""
 
     action_output_model: ClassVar[type[ActionOutputT]]
+    config_model: ClassVar[type[WorkflowStepCodexConfigT]]
     state_model: ClassVar[type[WorkflowStepCodexState]]
     step_key: ClassVar[str]
 
@@ -283,8 +307,8 @@ class WorkflowStepCodexBase(
         artifact_materializer: ArtifactMaterializer,
         artifact_writer: JsonArtifactWriter,
         codex_runner: CodexRunner,
-        config: WorkflowStepCodexConfig,
         prompt_renderer: PromptRenderer,
+        runtime_policy: WorkflowStepCodexRuntimePolicy,
     ) -> None:
         """Store reusable Codex lifecycle dependencies.
 
@@ -292,15 +316,46 @@ class WorkflowStepCodexBase(
             artifact_materializer: External artifact tree materializer.
             artifact_writer: Atomic writer for standard files.
             codex_runner: Low-level structured Codex execution boundary.
-            config: Explicit correction and execution policy.
             prompt_renderer: Strict project/runtime prompt renderer.
+            runtime_policy: Source-owned materialization and transport retry policy.
         """
 
         super().__init__(artifact_writer=artifact_writer)
         self._artifact_materializer = artifact_materializer
         self._codex_runner = codex_runner
-        self._config = config
         self._prompt_renderer = prompt_renderer
+        self._runtime_policy = runtime_policy
+
+    @final
+    def run(
+        self,
+        execution_context: WorkflowStepExecutionContext,
+        input_source: InputSourceT,
+        workflow_step_config: WorkflowStepCodexConfigT,
+    ) -> ResultT:
+        """Publish input and execute or recover one configured Codex step.
+
+        Args:
+            execution_context: Current step execution context.
+            input_source: Public dependencies selected by the DBOS wrapper.
+            workflow_step_config: Exact run-owned configuration selected by the workflow.
+
+        Returns:
+            Accepted public step result.
+        """
+
+        self._step_key_validate()
+        self._workflow_step_config_type_validate(workflow_step_config)
+        step_input = self._step_input_get(execution_context, input_source)
+        self._workflow_step_config_input_validate(
+            execution_context=execution_context,
+            workflow_step_config=workflow_step_config,
+        )
+        return self._lifecycle_run(
+            execution_context=execution_context,
+            step_input=step_input,
+            workflow_step_config=workflow_step_config,
+        )
 
     @abstractmethod
     def result_from_action_build(
@@ -345,30 +400,36 @@ class WorkflowStepCodexBase(
         *,
         execution_context: WorkflowStepExecutionContext,
         step_input: InputT,
+        workflow_step_config: WorkflowStepCodexConfigT,
     ) -> ResultT:
         """Execute or recover the Codex correction state machine."""
 
-        self._step_key_validate()
         state = self._state_get(execution_context=execution_context, step_input=step_input)
         while True:
             recovered_result = self._recovered_result_get(
                 execution_context=execution_context,
                 state=state,
                 step_input=step_input,
+                workflow_step_config=workflow_step_config,
             )
             if recovered_result is not None:
                 return recovered_result
             if state.state == "verification_failed":
-                self._retry_prepare(execution_context=execution_context, state=state)
+                self._retry_prepare(
+                    execution_context=execution_context,
+                    state=state,
+                    workflow_step_config=workflow_step_config,
+                )
             if state.state != "ready":
                 raise RuntimeError(f"Codex step has inconsistent state without accepted result: {state.state}")
             self.artifact_prepare(execution_context, step_input)
             action_output = self._action_output_get(
                 execution_context=execution_context,
                 state=state,
+                workflow_step_config=workflow_step_config,
             )
             self._artifact_materializer.materialize(
-                policy=self._config.artifact_materialization_policy,
+                policy=self._runtime_policy.artifact_materialization_policy,
                 result_dir=execution_context.result_dir,
                 step_instance_dir=execution_context.step_instance_dir,
             )
@@ -382,6 +443,7 @@ class WorkflowStepCodexBase(
                 state=state,
                 step_input=step_input,
                 result=result,
+                workflow_step_config=workflow_step_config,
             )
             if verification.status == "success":
                 state.state = "completed"
@@ -395,6 +457,7 @@ class WorkflowStepCodexBase(
         *,
         execution_context: WorkflowStepExecutionContext,
         state: WorkflowStepCodexState,
+        workflow_step_config: WorkflowStepCodexConfigT,
     ) -> ActionOutputT:
         """Render and execute one action attempt.
 
@@ -429,15 +492,32 @@ class WorkflowStepCodexBase(
             template_name=f"{self.step_key}.md.j2",
             variable_by_name_map=variable_by_name_map,
         )
+        prompt = "\n\n".join(
+            [
+                self._prompt_renderer.render(
+                    template_name="runtime/partial/stage_action_contract.md.j2",
+                    variable_by_name_map={
+                        "input_path": variable_by_name_map["input_path"],
+                        "step_key": self.step_key,
+                        "workflow_input_path": execution_context.workflow_input_path.as_posix(),
+                    },
+                ),
+                prompt,
+            ]
+        )
         return cast(
             ActionOutputT,
             self._codex_runner.run(
+                config=CodexRunnerConfig(
+                    model=workflow_step_config.model,
+                    reasoning_effort=workflow_step_config.reasoning_effort,
+                ),
                 diagnostic_dir=(
                     execution_context.step_instance_dir / "diagnostics" / f"attempt_{state.attempt_index}" / "action"
                 ),
                 output_model=self.action_output_model,
                 prompt=prompt,
-                retry_policy=self._config.execution_retry_policy,
+                retry_policy=self._runtime_policy.execution_retry_policy,
                 runtime_capability=execution_context.runtime_capability,
                 working_directory=execution_context.result_dir,
             ),
@@ -449,6 +529,7 @@ class WorkflowStepCodexBase(
         execution_context: WorkflowStepExecutionContext,
         state: WorkflowStepCodexState,
         step_input: InputT,
+        workflow_step_config: WorkflowStepCodexConfigT,
     ) -> ResultT | None:
         """Recover or classify one previously published candidate.
 
@@ -482,6 +563,7 @@ class WorkflowStepCodexBase(
                 state=state,
                 step_input=step_input,
                 result=result,
+                workflow_step_config=workflow_step_config,
             )
             if verification.status == "success":
                 state.state = "completed"
@@ -502,6 +584,7 @@ class WorkflowStepCodexBase(
                 state=state,
                 step_input=step_input,
                 result=result,
+                workflow_step_config=workflow_step_config,
             )
             if verification.status == "success":
                 state.state = "completed"
@@ -543,6 +626,7 @@ class WorkflowStepCodexBase(
         state: WorkflowStepCodexState,
         step_input: InputT,
         result: ResultT,
+        workflow_step_config: WorkflowStepCodexConfigT,
     ) -> VerificationResult:
         """Run mechanical validation and then mandatory semantic verification.
 
@@ -575,9 +659,29 @@ class WorkflowStepCodexBase(
                     ),
                 },
             )
+            prompt = "\n\n".join(
+                [
+                    self._prompt_renderer.render(
+                        template_name="runtime/partial/stage_verification_contract.md.j2",
+                        variable_by_name_map={
+                            "input_path": self._relative_path_get(
+                                path=input_path_get(execution_context.step_instance_dir),
+                                result_dir=execution_context.result_dir,
+                            ),
+                            "step_key": self.step_key,
+                            "workflow_input_path": execution_context.workflow_input_path.as_posix(),
+                        },
+                    ),
+                    prompt,
+                ]
+            )
             decision = cast(
                 VerificationDecision,
                 self._codex_runner.run(
+                    config=CodexRunnerConfig(
+                        model=workflow_step_config.model,
+                        reasoning_effort=workflow_step_config.reasoning_effort,
+                    ),
                     diagnostic_dir=(
                         execution_context.step_instance_dir
                         / "diagnostics"
@@ -586,7 +690,7 @@ class WorkflowStepCodexBase(
                     ),
                     output_model=VerificationDecision,
                     prompt=prompt,
-                    retry_policy=self._config.execution_retry_policy,
+                    retry_policy=self._runtime_policy.execution_retry_policy,
                     runtime_capability=execution_context.runtime_capability,
                     working_directory=execution_context.result_dir,
                 ),
@@ -604,6 +708,7 @@ class WorkflowStepCodexBase(
         *,
         execution_context: WorkflowStepExecutionContext,
         state: WorkflowStepCodexState,
+        workflow_step_config: WorkflowStepCodexConfigT,
     ) -> None:
         """Advance one failed verdict to the next ready attempt exactly once.
 
@@ -618,7 +723,7 @@ class WorkflowStepCodexBase(
         verification = VerificationResult.model_validate_json(
             verification_path_get(execution_context.step_instance_dir).read_text(encoding="utf-8")
         )
-        if state.attempt_index >= self._config.attempt_limit:
+        if state.attempt_index - 1 >= workflow_step_config.correction_attempt_limit:
             raise StepResultValidationError(feedback_list=verification.feedback_list)
         state.attempt_index += 1
         state.state = "ready"
@@ -682,3 +787,127 @@ class WorkflowStepCodexBase(
 
         if not self.step_key:
             raise RuntimeError(f"{type(self).__name__} must declare step_key")
+
+    def _workflow_step_config_input_validate(
+        self,
+        *,
+        execution_context: WorkflowStepExecutionContext,
+        workflow_step_config: WorkflowStepCodexConfigT,
+    ) -> None:
+        """Require the DBOS argument to match the persisted workflow input exactly.
+
+        Args:
+            execution_context: Current step execution context.
+            workflow_step_config: Exact configuration passed to the DBOS step call.
+
+        Raises:
+            RuntimeError: If the persisted input lacks this step config or differs from the argument.
+        """
+
+        workflow_input_path = execution_context.result_dir / execution_context.workflow_input_path
+        try:
+            workflow_input_value = json.loads(workflow_input_path.read_text(encoding="utf-8"))
+            config_value = workflow_input_value["config"]["step_map"][self.step_key]
+        except (KeyError, TypeError, json.JSONDecodeError, OSError) as exc:
+            raise RuntimeError(f"workflow input does not contain config for {self.step_key}") from exc
+        persisted_config = self.config_model.model_validate(config_value)
+        if persisted_config != workflow_step_config:
+            raise RuntimeError(f"workflow step config does not match workflow input for {self.step_key}")
+
+    def _workflow_step_config_type_validate(self, workflow_step_config: WorkflowStepCodexConfigT) -> None:
+        """Require the exact concrete config model selected by the step owner.
+
+        Args:
+            workflow_step_config: Candidate run-owned Codex configuration.
+
+        Raises:
+            TypeError: If the caller supplied another model type.
+        """
+
+        if type(workflow_step_config) is not self.config_model:
+            raise TypeError(
+                f"workflow_step_config is {type(workflow_step_config).__name__}; expected {self.config_model.__name__}"
+            )
+
+
+class WorkflowStepCodexConcurrentBase(
+    WorkflowStepCodexBase[
+        InputSourceT,
+        InputT,
+        WorkflowStepCodexConcurrentConfigT,
+        ActionOutputT,
+        ResultT,
+    ],
+    Generic[InputSourceT, InputT, WorkflowStepCodexConcurrentConfigT, ActionOutputT, ResultT],
+):
+    """Schedule bounded independent Codex step invocations in input order."""
+
+    @final
+    async def run_list(
+        self,
+        invocation_list: list[WorkflowStepInvocation[InputSourceT]],
+        workflow_step_config: WorkflowStepCodexConcurrentConfigT,
+    ) -> list[ResultT]:
+        """Run all independent invocation objects with one bounded DBOS scheduler.
+
+        Args:
+            invocation_list: Non-empty ordered independent step invocations.
+            workflow_step_config: Exact shared concurrent run configuration.
+
+        Returns:
+            Accepted results in input order.
+
+        Raises:
+            ValueError: If invocation contexts do not describe one concurrent group.
+            BaseException: The lowest-index invocation error after all work completes.
+        """
+
+        if not invocation_list:
+            raise ValueError("invocation_list must not be empty")
+        self._workflow_step_config_type_validate(workflow_step_config)
+        first_context = invocation_list[0].execution_context
+        step_instance_dir_set: set[Path] = set()
+        for invocation in invocation_list:
+            execution_context = invocation.execution_context
+            step_instance_dir = execution_context.step_instance_dir.resolve()
+            if execution_context.result_dir != first_context.result_dir:
+                raise ValueError("all invocations must use one result_dir")
+            if execution_context.workflow_input_path != first_context.workflow_input_path:
+                raise ValueError("all invocations must use one workflow_input_path")
+            if step_instance_dir in step_instance_dir_set:
+                raise ValueError("invocations must use unique step_instance_dir values")
+            try:
+                step_instance_dir.relative_to(execution_context.result_dir.resolve())
+            except ValueError as exc:
+                raise ValueError("every step_instance_dir must be inside result_dir") from exc
+            step_instance_dir_set.add(step_instance_dir)
+
+        semaphore = asyncio.Semaphore(workflow_step_config.concurrency)
+
+        async def invocation_result_get(invocation: WorkflowStepInvocation[InputSourceT]) -> ResultT:
+            """Run one DBOS step while holding one scheduler slot.
+
+            Args:
+                invocation: Independent step context and public input source.
+
+            Returns:
+                Accepted public result for the invocation.
+            """
+
+            async with semaphore:
+                return await DBOS.run_step_async(
+                    {"name": f"{type(self).__name__}.run"},
+                    self.run,
+                    invocation.execution_context,
+                    invocation.input_source,
+                    workflow_step_config,
+                )
+
+        result_or_error_list = await asyncio.gather(
+            *(asyncio.create_task(invocation_result_get(invocation)) for invocation in invocation_list),
+            return_exceptions=True,
+        )
+        for result_or_error in result_or_error_list:
+            if isinstance(result_or_error, BaseException):
+                raise result_or_error
+        return cast(list[ResultT], result_or_error_list)

@@ -27,6 +27,8 @@ def test_workflow_context_builds_deterministic_child_directories(tmp_path: Path)
 
     assert child.workflow_instance_dir == tmp_path / "workflow" / "run" / "workflow" / "brand_defacto"
     assert step.step_instance_dir == child.workflow_instance_dir / "step" / "source_discover"
+    assert step.workflow_input_path == Path("workflow/run/workflow/brand_defacto/input.json")
+    assert not step.workflow_input_path.is_absolute()
 
 
 def test_workflow_context_rejects_paths_outside_result_root(tmp_path: Path) -> None:

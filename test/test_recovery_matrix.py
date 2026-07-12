@@ -1,5 +1,7 @@
 """Behavior tests for crash recovery and standard-artifact identity guards."""
 
+import asyncio
+
 from collections.abc import Iterator
 from pathlib import Path
 from typing import ClassVar
@@ -19,16 +21,22 @@ from workflow_container_runtime.step import (
     CodexExecutionRetryPolicy,
     StepResultValidationError,
     WorkflowStepCodexBase,
-    WorkflowStepCodexConfig,
+    WorkflowStepCodexConcurrentBase,
+    WorkflowStepCodexConcurrentConfigBase,
+    WorkflowStepCodexConfigBase,
+    WorkflowStepCodexRuntimePolicy,
     WorkflowStepCodexState,
     WorkflowStepExecutionContext,
+    WorkflowStepInvocation,
 )
 from workflow_container_runtime.step.file import input_path_get, result_path_get, state_path_get, verification_path_get
 from workflow_container_runtime.state import SqliteStateStore, SqliteStateTable, state_database_path_get
 from workflow_container_runtime.verification import VerificationDecision, VerificationResult
 from workflow_container_runtime.workflow import (
     WorkflowBase,
+    WorkflowConfigBase,
     WorkflowExecutionContext,
+    WorkflowInputBase,
     WorkflowResultValidationError,
     WorkflowRuntimeCapability,
 )
@@ -64,6 +72,31 @@ class RecoveryStepInput(RecoveryModel):
     """Persist one recoverable Codex step input."""
 
     value: str
+    workflow_input_path: Path
+
+
+class RecoveryStepConfig(WorkflowStepCodexConfigBase):
+    """Provide one exact user-owned config for the recovery step."""
+
+
+class RecoveryConcurrentStepConfig(WorkflowStepCodexConcurrentConfigBase):
+    """Provide one exact user-owned config for concurrent recovery work."""
+
+
+class RecoveryStepConfigMap(RecoveryModel):
+    """Expose the closed recovery-step config map."""
+
+    recovery: RecoveryStepConfig
+
+
+class RecoveryCodexWorkflowConfig(WorkflowConfigBase):
+    """Provide the complete public workflow configuration for Codex recovery."""
+
+    step_map: RecoveryStepConfigMap
+
+
+class RecoveryCodexWorkflowInput(WorkflowInputBase[RecoveryStepInputSource, RecoveryCodexWorkflowConfig]):
+    """Bind the recovery request and config into the persisted workflow input."""
 
 
 class RecoveryActionOutput(RecoveryModel):
@@ -83,6 +116,18 @@ class RecoveryRecord(RecoveryModel):
 
     record_key: str
     value: str
+
+
+RECOVERY_STEP_CONFIG = RecoveryStepConfig(
+    correction_attempt_limit=2,
+    instruction="",
+    model="gpt-5.6-terra",
+    reasoning_effort="high",
+)
+RECOVERY_RUNTIME_POLICY = WorkflowStepCodexRuntimePolicy(
+    artifact_materialization_policy=ArtifactMaterializationPolicy(artifact_root_tuple=()),
+    execution_retry_policy=CodexExecutionRetryPolicy(attempt_limit=1),
+)
 
 
 class RecordingJsonArtifactWriter(JsonArtifactWriter):
@@ -137,6 +182,7 @@ class ScriptedCodexRunner:
     def run(
         self,
         *,
+        config: object,
         diagnostic_dir: Path,
         output_model: type[BaseModel],
         prompt: str,
@@ -148,6 +194,7 @@ class ScriptedCodexRunner:
 
         self.call_list.append(
             {
+                "config": config,
                 "diagnostic_dir": diagnostic_dir,
                 "output_model": output_model,
                 "prompt": prompt,
@@ -163,11 +210,18 @@ class ScriptedCodexRunner:
 
 
 class RecoveryCodexStep(
-    WorkflowStepCodexBase[RecoveryStepInputSource, RecoveryStepInput, RecoveryActionOutput, RecoveryStepResult]
+    WorkflowStepCodexBase[
+        RecoveryStepInputSource,
+        RecoveryStepInput,
+        RecoveryStepConfig,
+        RecoveryActionOutput,
+        RecoveryStepResult,
+    ]
 ):
     """Exercise the generic Codex recovery FSM with scripted responses."""
 
     action_output_model: ClassVar[type[RecoveryActionOutput]] = RecoveryActionOutput
+    config_model: ClassVar[type[RecoveryStepConfig]] = RecoveryStepConfig
     result_model: ClassVar[type[RecoveryStepResult]] = RecoveryStepResult
     state_model: ClassVar[type[WorkflowStepCodexState]] = WorkflowStepCodexState
     step_key: ClassVar[str] = "recovery"
@@ -179,8 +233,7 @@ class RecoveryCodexStep(
     ) -> RecoveryStepInput:
         """Build the persisted step input."""
 
-        _ = execution_context
-        return RecoveryStepInput(value=input_source.value)
+        return RecoveryStepInput(value=input_source.value, workflow_input_path=execution_context.workflow_input_path)
 
     def result_from_action_build(
         self,
@@ -206,6 +259,45 @@ class RecoveryCodexStep(
         _ = step_input
         if result.output == "invalid":
             raise StepResultValidationError(feedback_list=["Replace the invalid output."])
+
+
+class RecoveryConcurrentCodexStep(
+    WorkflowStepCodexConcurrentBase[
+        RecoveryStepInputSource,
+        RecoveryStepInput,
+        RecoveryConcurrentStepConfig,
+        RecoveryActionOutput,
+        RecoveryStepResult,
+    ]
+):
+    """Provide the concrete type contract required by the concurrent scheduler."""
+
+    action_output_model: ClassVar[type[RecoveryActionOutput]] = RecoveryActionOutput
+    config_model: ClassVar[type[RecoveryConcurrentStepConfig]] = RecoveryConcurrentStepConfig
+    result_model: ClassVar[type[RecoveryStepResult]] = RecoveryStepResult
+    state_model: ClassVar[type[WorkflowStepCodexState]] = WorkflowStepCodexState
+    step_key: ClassVar[str] = "recovery"
+
+    def input_build(
+        self,
+        execution_context: WorkflowStepExecutionContext,
+        input_source: RecoveryStepInputSource,
+    ) -> RecoveryStepInput:
+        """Build the persisted input for one independently scheduled step."""
+
+        return RecoveryStepInput(value=input_source.value, workflow_input_path=execution_context.workflow_input_path)
+
+    def result_from_action_build(
+        self,
+        execution_context: WorkflowStepExecutionContext,
+        step_input: RecoveryStepInput,
+        action_output: RecoveryActionOutput,
+    ) -> RecoveryStepResult:
+        """Build one public result from the action output."""
+
+        _ = execution_context
+        _ = step_input
+        return RecoveryStepResult(output=action_output.output)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -241,22 +333,30 @@ def _codex_step_get(
         artifact_materializer=ArtifactMaterializer(),
         artifact_writer=writer,
         codex_runner=codex_runner,
-        config=WorkflowStepCodexConfig(
-            artifact_materialization_policy=ArtifactMaterializationPolicy(artifact_root_tuple=()),
-            attempt_limit=3,
-            execution_retry_policy=CodexExecutionRetryPolicy(attempt_limit=1),
-        ),
         prompt_renderer=PromptRenderer(template_dir=template_dir),
+        runtime_policy=RECOVERY_RUNTIME_POLICY,
     )
 
 
 def _step_context_get(tmp_path: Path) -> WorkflowStepExecutionContext:
     """Build one stable Codex step execution context."""
 
+    workflow_instance_dir = tmp_path / "workflow" / "run"
+    JsonArtifactWriter().write(
+        input_path_get(workflow_instance_dir),
+        RecoveryCodexWorkflowInput(
+            config=RecoveryCodexWorkflowConfig(
+                instruction="",
+                step_map=RecoveryStepConfigMap(recovery=RECOVERY_STEP_CONFIG),
+            ),
+            request=RecoveryStepInputSource(value="workflow"),
+        ),
+    )
     return WorkflowStepExecutionContext(
         result_dir=tmp_path,
         runtime_capability=WorkflowRuntimeCapability(browser=None),
-        step_instance_dir=tmp_path / "workflow" / "run" / "step" / "recovery",
+        step_instance_dir=workflow_instance_dir / "step" / "recovery",
+        workflow_input_path=Path("workflow/run/input.json"),
     )
 
 
@@ -268,6 +368,71 @@ def _workflow_context_get(tmp_path: Path, *, instance_key: str) -> WorkflowExecu
         runtime_capability=WorkflowRuntimeCapability(browser=None),
         workflow_instance_dir=tmp_path / "workflow" / instance_key,
     )
+
+
+def test_codex_concurrent_step_returns_input_order_with_bounded_dbos_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Run every independent invocation and return its accepted result in input order."""
+
+    active_count = 0
+    max_active_count = 0
+
+    async def run_step_async(
+        options: dict[str, str],
+        func: object,
+        execution_context: WorkflowStepExecutionContext,
+        input_source: RecoveryStepInputSource,
+        workflow_step_config: RecoveryConcurrentStepConfig,
+    ) -> RecoveryStepResult:
+        """Model one checkpointed DBOS step with deliberately different completion order."""
+
+        nonlocal active_count, max_active_count
+        _ = options
+        _ = func
+        _ = execution_context
+        _ = workflow_step_config
+        active_count += 1
+        max_active_count = max(max_active_count, active_count)
+        await asyncio.sleep(0.02 if input_source.value == "first" else 0)
+        active_count -= 1
+        return RecoveryStepResult(output=input_source.value)
+
+    monkeypatch.setattr(DBOS, "run_step_async", run_step_async)
+    context = _step_context_get(tmp_path)
+    step = RecoveryConcurrentCodexStep(
+        artifact_materializer=ArtifactMaterializer(),
+        artifact_writer=JsonArtifactWriter(),
+        codex_runner=ScriptedCodexRunner([]),
+        prompt_renderer=PromptRenderer(template_dir=tmp_path / "template"),
+        runtime_policy=RECOVERY_RUNTIME_POLICY,
+    )
+    config = RecoveryConcurrentStepConfig(
+        concurrency=2,
+        correction_attempt_limit=0,
+        instruction="",
+        model="gpt-5.6-terra",
+        reasoning_effort="high",
+    )
+    invocation_list = [
+        WorkflowStepInvocation(
+            execution_context=context.model_copy(
+                update={"step_instance_dir": context.step_instance_dir.parent / step_instance_key}
+            ),
+            input_source=RecoveryStepInputSource(value=step_instance_key),
+        )
+        for step_instance_key in ["first", "second", "third"]
+    ]
+
+    result_list = asyncio.run(step.run_list(invocation_list, config))
+
+    assert result_list == [
+        RecoveryStepResult(output="first"),
+        RecoveryStepResult(output="second"),
+        RecoveryStepResult(output="third"),
+    ]
+    assert max_active_count == 2
 
 
 def test_workflow_result_without_verdict_is_revalidated_without_republication(tmp_path: Path) -> None:
@@ -347,7 +512,10 @@ def test_codex_result_published_without_verdict_runs_only_verification(tmp_path:
     context = _step_context_get(tmp_path)
     input_source = RecoveryStepInputSource(value="text")
     context.step_instance_dir.mkdir(parents=True)
-    writer.write(input_path_get(context.step_instance_dir), RecoveryStepInput(value="text"))
+    writer.write(
+        input_path_get(context.step_instance_dir),
+        RecoveryStepInput(value="text", workflow_input_path=context.workflow_input_path),
+    )
     writer.write(result_path_get(context.step_instance_dir), RecoveryStepResult(output="stored"))
     writer.write(
         state_path_get(context.step_instance_dir),
@@ -355,7 +523,7 @@ def test_codex_result_published_without_verdict_runs_only_verification(tmp_path:
     )
     writer.operation_list.clear()
 
-    recovered_result = step.run(context, input_source)
+    recovered_result = step.run(context, input_source, RECOVERY_STEP_CONFIG)
 
     assert recovered_result == RecoveryStepResult(output="stored")
     assert [call["output_model"] for call in codex_runner.call_list] == [VerificationDecision]
@@ -376,7 +544,10 @@ def test_codex_rejects_missing_state_for_started_bundle(tmp_path: Path, started_
     input_source = RecoveryStepInputSource(value="text")
     result = RecoveryStepResult(output="stored")
     context.step_instance_dir.mkdir(parents=True)
-    writer.write(input_path_get(context.step_instance_dir), RecoveryStepInput(value="text"))
+    writer.write(
+        input_path_get(context.step_instance_dir),
+        RecoveryStepInput(value="text", workflow_input_path=context.workflow_input_path),
+    )
     if started_bundle in {"result", "exhausted"}:
         writer.write(result_path_get(context.step_instance_dir), result)
     if started_bundle in {"verification", "exhausted"}:
@@ -394,7 +565,7 @@ def test_codex_rejects_missing_state_for_started_bundle(tmp_path: Path, started_
         artifact_path.write_text("existing\n", encoding="utf-8")
 
     with pytest.raises(RuntimeError):
-        step.run(context, input_source)
+        step.run(context, input_source, RECOVERY_STEP_CONFIG)
 
     assert not state_path_get(context.step_instance_dir).exists()
     assert codex_runner.call_list == []
@@ -410,7 +581,10 @@ def test_codex_stale_failed_verdict_verifies_new_result_without_action(tmp_path:
     input_source = RecoveryStepInputSource(value="text")
     new_result = RecoveryStepResult(output="new")
     context.step_instance_dir.mkdir(parents=True)
-    writer.write(input_path_get(context.step_instance_dir), RecoveryStepInput(value="text"))
+    writer.write(
+        input_path_get(context.step_instance_dir),
+        RecoveryStepInput(value="text", workflow_input_path=context.workflow_input_path),
+    )
     writer.write(result_path_get(context.step_instance_dir), new_result)
     writer.write(
         verification_path_get(context.step_instance_dir),
@@ -426,7 +600,7 @@ def test_codex_stale_failed_verdict_verifies_new_result_without_action(tmp_path:
     )
     writer.operation_list.clear()
 
-    recovered_result = step.run(context, input_source)
+    recovered_result = step.run(context, input_source, RECOVERY_STEP_CONFIG)
 
     assert recovered_result == new_result
     assert [call["output_model"] for call in codex_runner.call_list] == [VerificationDecision]
@@ -446,7 +620,10 @@ def test_codex_ready_previous_revision_verdict_reverifies_same_result_after_arti
     input_source = RecoveryStepInputSource(value="text")
     result = RecoveryStepResult(output="same")
     context.step_instance_dir.mkdir(parents=True)
-    writer.write(input_path_get(context.step_instance_dir), RecoveryStepInput(value="text"))
+    writer.write(
+        input_path_get(context.step_instance_dir),
+        RecoveryStepInput(value="text", workflow_input_path=context.workflow_input_path),
+    )
     writer.write(result_path_get(context.step_instance_dir), result)
     declared_artifact_path = context.step_instance_dir / "evidence.txt"
     declared_artifact_path.write_text("attempt-1", encoding="utf-8")
@@ -466,7 +643,7 @@ def test_codex_ready_previous_revision_verdict_reverifies_same_result_after_arti
     result_bytes = result_path_get(context.step_instance_dir).read_bytes()
     writer.operation_list.clear()
 
-    recovered_result = step.run(context, input_source)
+    recovered_result = step.run(context, input_source, RECOVERY_STEP_CONFIG)
 
     assert recovered_result == result
     assert [call["output_model"] for call in codex_runner.call_list] == [VerificationDecision]
@@ -494,7 +671,10 @@ def test_codex_ready_revision_probe_failure_runs_same_attempt_action(tmp_path: P
     input_source = RecoveryStepInputSource(value="text")
     result = RecoveryStepResult(output="same")
     context.step_instance_dir.mkdir(parents=True)
-    writer.write(input_path_get(context.step_instance_dir), RecoveryStepInput(value="text"))
+    writer.write(
+        input_path_get(context.step_instance_dir),
+        RecoveryStepInput(value="text", workflow_input_path=context.workflow_input_path),
+    )
     writer.write(result_path_get(context.step_instance_dir), result)
     declared_artifact_path = context.step_instance_dir / "evidence.txt"
     declared_artifact_path.write_text("attempt-1", encoding="utf-8")
@@ -513,7 +693,7 @@ def test_codex_ready_revision_probe_failure_runs_same_attempt_action(tmp_path: P
     )
     writer.operation_list.clear()
 
-    recovered_result = step.run(context, input_source)
+    recovered_result = step.run(context, input_source, RECOVERY_STEP_CONFIG)
 
     assert recovered_result == result
     assert [call["output_model"] for call in codex_runner.call_list] == [
@@ -540,7 +720,10 @@ def test_codex_stale_success_verdict_is_reverified_before_acceptance(tmp_path: P
     input_source = RecoveryStepInputSource(value="text")
     current_result = RecoveryStepResult(output="current")
     context.step_instance_dir.mkdir(parents=True)
-    writer.write(input_path_get(context.step_instance_dir), RecoveryStepInput(value="text"))
+    writer.write(
+        input_path_get(context.step_instance_dir),
+        RecoveryStepInput(value="text", workflow_input_path=context.workflow_input_path),
+    )
     writer.write(result_path_get(context.step_instance_dir), current_result)
     writer.write(
         verification_path_get(context.step_instance_dir),
@@ -556,7 +739,7 @@ def test_codex_stale_success_verdict_is_reverified_before_acceptance(tmp_path: P
     )
     writer.operation_list.clear()
 
-    recovered_result = step.run(context, input_source)
+    recovered_result = step.run(context, input_source, RECOVERY_STEP_CONFIG)
 
     assert recovered_result == current_result
     assert [call["output_model"] for call in codex_runner.call_list] == [VerificationDecision]
@@ -575,7 +758,10 @@ def test_codex_matching_success_verdict_recovers_without_external_call(tmp_path:
     input_source = RecoveryStepInputSource(value="text")
     result = RecoveryStepResult(output="accepted")
     context.step_instance_dir.mkdir(parents=True)
-    writer.write(input_path_get(context.step_instance_dir), RecoveryStepInput(value="text"))
+    writer.write(
+        input_path_get(context.step_instance_dir),
+        RecoveryStepInput(value="text", workflow_input_path=context.workflow_input_path),
+    )
     writer.write(result_path_get(context.step_instance_dir), result)
     writer.write(
         verification_path_get(context.step_instance_dir),
@@ -590,7 +776,7 @@ def test_codex_matching_success_verdict_recovers_without_external_call(tmp_path:
         WorkflowStepCodexState(attempt_index=2, state="result_published"),
     )
 
-    assert step.run(context, input_source) == result
+    assert step.run(context, input_source, RECOVERY_STEP_CONFIG) == result
     assert codex_runner.call_list == []
     assert WorkflowStepCodexState.model_validate_json(
         state_path_get(context.step_instance_dir).read_text(encoding="utf-8")
@@ -613,7 +799,10 @@ def test_codex_verification_failed_retry_transition_is_recorded_once(tmp_path: P
     context = _step_context_get(tmp_path)
     input_source = RecoveryStepInputSource(value="text")
     context.step_instance_dir.mkdir(parents=True)
-    writer.write(input_path_get(context.step_instance_dir), RecoveryStepInput(value="text"))
+    writer.write(
+        input_path_get(context.step_instance_dir),
+        RecoveryStepInput(value="text", workflow_input_path=context.workflow_input_path),
+    )
     writer.write(result_path_get(context.step_instance_dir), RecoveryStepResult(output="rejected"))
     writer.write(
         verification_path_get(context.step_instance_dir),
@@ -630,13 +819,13 @@ def test_codex_verification_failed_retry_transition_is_recorded_once(tmp_path: P
     writer.operation_list.clear()
 
     with pytest.raises(RuntimeError, match="simulated action crash"):
-        step.run(context, input_source)
+        step.run(context, input_source, RECOVERY_STEP_CONFIG)
 
     assert WorkflowStepCodexState.model_validate_json(
         state_path_get(context.step_instance_dir).read_text(encoding="utf-8")
     ) == WorkflowStepCodexState(attempt_index=2, state="ready")
 
-    recovered_result = step.run(context, input_source)
+    recovered_result = step.run(context, input_source, RECOVERY_STEP_CONFIG)
 
     assert recovered_result == RecoveryStepResult(output="recovered")
     assert WorkflowStepCodexState.model_validate_json(

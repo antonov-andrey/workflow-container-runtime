@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from workflow_container_runtime.capability import WorkflowRuntimeCapability
 from workflow_container_runtime.instance import instance_key_validate, instance_path_validate
 from workflow_container_runtime.step.context import WorkflowStepExecutionContext
+from workflow_container_runtime.step.file import input_path_get
 
 
 class WorkflowExecutionContext(BaseModel):
@@ -78,4 +79,5 @@ class WorkflowExecutionContext(BaseModel):
             result_dir=self.result_dir,
             runtime_capability=runtime_capability,
             step_instance_dir=self.workflow_instance_dir / "step" / step_instance_key,
+            workflow_input_path=input_path_get(self.workflow_instance_dir).relative_to(self.result_dir),
         )

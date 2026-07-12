@@ -71,7 +71,6 @@ def _runner_get() -> CodexRunner:
 
     return CodexRunner(
         artifact_writer=codex_runner.JsonArtifactWriter(),
-        config=CodexRunnerConfig(model="gpt-5.6-terra", model_reasoning_effort="high"),
         prompt_renderer=codex_runner.PromptRenderer(),
         workflow_container_name="example-container",
     )
@@ -81,6 +80,7 @@ def _run_kwargs_get(tmp_path: Path, *, attempt_limit: int = 1) -> dict[str, obje
     """Build the invariant public arguments of one runner call."""
 
     return {
+        "config": CodexRunnerConfig(model="gpt-5.6-terra", reasoning_effort="high"),
         "diagnostic_dir": tmp_path / "workflow" / "step" / "diagnostics" / "action",
         "output_model": OutputResult,
         "prompt": "Return one output object.",
@@ -96,7 +96,6 @@ def test_codex_runner_routes_system_prompts_through_runtime_namespace() -> None:
     prompt_renderer = RecordingPromptRenderer()
     runner = CodexRunner(
         artifact_writer=codex_runner.JsonArtifactWriter(),
-        config=CodexRunnerConfig(model="gpt-5.6-terra", model_reasoning_effort="high"),
         prompt_renderer=prompt_renderer,
         workflow_container_name="example-container",
     )
@@ -113,9 +112,11 @@ def test_codex_runner_exposes_only_the_canonical_low_level_api() -> None:
     """Expose the documented runner and error without legacy aliases."""
 
     run_signature = inspect.signature(CodexRunner.run)
+    init_signature = inspect.signature(CodexRunner)
 
     assert list(run_signature.parameters) == [
         "self",
+        "config",
         "diagnostic_dir",
         "output_model",
         "prompt",
@@ -123,6 +124,7 @@ def test_codex_runner_exposes_only_the_canonical_low_level_api() -> None:
         "runtime_capability",
         "working_directory",
     ]
+    assert list(init_signature.parameters) == ["artifact_writer", "prompt_renderer", "workflow_container_name"]
     assert "CodexRunner" in codex.__all__
     assert "CodexExecutionError" in codex.__all__
     assert not hasattr(codex, "CodexStageRunner")

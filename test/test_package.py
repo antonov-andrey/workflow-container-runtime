@@ -10,7 +10,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 import workflow_container_runtime
 from workflow_container_runtime.model import strict_model_contract_validate
 from workflow_container_runtime.step import BrowserActionResult, BrowsingError
+from workflow_container_runtime.step import (
+    WorkflowStepCodexConcurrentConfigBase,
+    WorkflowStepCodexConfigBase,
+    WorkflowStepCodexRuntimePolicy,
+)
 from workflow_container_runtime.verification import VerificationDecision, VerificationResult
+from workflow_container_runtime.workflow import WorkflowConfigBase, WorkflowInputBase
 
 
 def test_setuptools_package_discovery_excludes_tests() -> None:
@@ -25,7 +31,7 @@ def test_setuptools_package_discovery_excludes_tests() -> None:
 def test_package_root_does_not_duplicate_distribution_version() -> None:
     """Keep distribution versioning in installed package metadata only."""
 
-    assert importlib.metadata.version("workflow-container-runtime") == "0.3.0"
+    assert importlib.metadata.version("workflow-container-runtime") == "0.4.0"
     assert not hasattr(workflow_container_runtime, "__version__")
     assert "__version__" not in workflow_container_runtime.__all__
 
@@ -61,6 +67,51 @@ def test_runtime_result_models_require_explicit_list_fields() -> None:
         VerificationDecision(status="success")
     with pytest.raises(ValidationError):
         VerificationResult(status="success", feedback_list=[])
+
+
+def test_workflow_input_and_codex_step_config_require_every_public_field() -> None:
+    """Keep schema defaults as annotations while runtime config remains explicit."""
+
+    class ExampleRequest(BaseModel):
+        """Provide the public workflow request contract."""
+
+        model_config = ConfigDict(extra="forbid", frozen=True, strict=True, validate_default=True)
+
+        value: str
+
+    class ExampleWorkflowConfig(WorkflowConfigBase):
+        """Provide one exact workflow-level config contract."""
+
+        model_config = ConfigDict(extra="forbid", frozen=True, strict=True, validate_default=True)
+
+        step_map: dict[str, WorkflowStepCodexConfigBase]
+
+    class ExampleWorkflowInput(WorkflowInputBase[ExampleRequest, ExampleWorkflowConfig]):
+        """Bind the request and config into the public workflow input."""
+
+        model_config = ConfigDict(extra="forbid", frozen=True, strict=True, validate_default=True)
+
+    with pytest.raises(ValidationError):
+        WorkflowStepCodexConfigBase()
+    with pytest.raises(ValidationError):
+        ExampleWorkflowInput()
+    with pytest.raises(ValidationError):
+        WorkflowStepCodexConfigBase(
+            correction_attempt_limit=0,
+            instruction="",
+            model="gpt-5.6-terra",
+            reasoning_effort="ultra",
+        )
+
+    schema = WorkflowStepCodexConfigBase.model_json_schema()
+    assert schema["properties"]["model"]["default"] == "gpt-5.6-terra"
+    assert schema["properties"]["reasoning_effort"]["default"] == "high"
+    assert set(schema["required"]) == {"correction_attempt_limit", "instruction", "model", "reasoning_effort"}
+    assert WorkflowStepCodexRuntimePolicy.model_fields.keys() == {
+        "artifact_materialization_policy",
+        "execution_retry_policy",
+    }
+    assert issubclass(WorkflowStepCodexConcurrentConfigBase, WorkflowStepCodexConfigBase)
 
 
 def test_verification_result_binds_decision_to_exact_canonical_result() -> None:

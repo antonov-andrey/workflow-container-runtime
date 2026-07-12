@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "workflow-container-runtime"
-version = "0.3.0"
+version = "0.4.0"
 description = "Reusable runtime mechanics for workflow-container projects"
 requires-python = ">=3.14"
 dependencies = [
