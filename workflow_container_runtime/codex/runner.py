@@ -156,6 +156,7 @@ class CodexRunner:
             output_path=output_path,
             stderr_path=stderr_path,
         )
+        event_path.touch()
         self._artifact_writer.schema_write(schema_path, output_model)
         system_prompt = self._system_prompt_get(have_browser_runtime=have_browser_runtime)
         prompt_path.write_text(f"{system_prompt}\n\n{prompt}\n", encoding="utf-8")
@@ -173,7 +174,6 @@ class CodexRunner:
             diagnostic_dir=diagnostic_dir,
             working_directory=working_directory,
         )
-        event_path.write_text(process.stdout, encoding="utf-8")
         stderr_path.write_text(process.stderr, encoding="utf-8")
         if have_browser_runtime:
             self._browser_tool_contract_validate(event_path=event_path)
@@ -404,6 +404,33 @@ class CodexRunner:
         except OSError:
             return False
 
+    def _event_stdout_append(
+        self,
+        *,
+        event_path: Path,
+        final: bool,
+        persisted_stdout_offset: int,
+        stdout_snapshot: str,
+    ) -> int:
+        """Append newly observed Codex stdout records and return the cumulative persisted offset.
+
+        Args:
+            event_path: Append-only Codex JSONL event stream path.
+            final: Whether this is the terminal stdout snapshot.
+            persisted_stdout_offset: Character offset persisted from earlier cumulative snapshots.
+            stdout_snapshot: Current cumulative stdout snapshot.
+
+        Returns:
+            Character offset persisted from the cumulative stdout snapshot.
+        """
+
+        stdout_suffix = stdout_snapshot[persisted_stdout_offset:]
+        stdout_text = stdout_suffix if final else stdout_suffix[: stdout_suffix.rfind("\n") + 1]
+        if stdout_text:
+            with event_path.open("a", encoding="utf-8") as event_file:
+                event_file.write(stdout_text)
+        return persisted_stdout_offset + len(stdout_text)
+
     def _output_model_get(
         self,
         *,
@@ -552,11 +579,18 @@ class CodexRunner:
                 activity_path_list.append(browser_artifact_path)
         execution_activity_marker = self._path_activity_marker_list_get(activity_path_list)
         partial_stdout_text = ""
+        persisted_stdout_offset = 0
         while True:
             try:
                 stdout, stderr = process.communicate(
                     input=communicate_input,
                     timeout=CODEX_EXEC_POLL_SECONDS,
+                )
+                self._event_stdout_append(
+                    event_path=diagnostic_dir / "event.jsonl",
+                    final=True,
+                    persisted_stdout_offset=persisted_stdout_offset,
+                    stdout_snapshot=stdout,
                 )
                 if process.returncode is None:
                     return subprocess.CompletedProcess(args=command, returncode=1, stdout=stdout, stderr=stderr)
@@ -571,12 +605,23 @@ class CodexRunner:
                 partial_stdout_changed = partial_stdout != partial_stdout_text
                 if partial_stdout_changed:
                     partial_stdout_text = partial_stdout
-                    (diagnostic_dir / "event.jsonl").write_text(partial_stdout, encoding="utf-8")
+                    persisted_stdout_offset = self._event_stdout_append(
+                        event_path=diagnostic_dir / "event.jsonl",
+                        final=False,
+                        persisted_stdout_offset=persisted_stdout_offset,
+                        stdout_snapshot=partial_stdout,
+                    )
                 if self._codex_completion_output_exist(
                     diagnostic_dir=diagnostic_dir,
                     output_path=output_path,
                 ):
                     stdout, stderr = self._process_group_terminate(process)
+                    self._event_stdout_append(
+                        event_path=diagnostic_dir / "event.jsonl",
+                        final=True,
+                        persisted_stdout_offset=persisted_stdout_offset,
+                        stdout_snapshot=stdout,
+                    )
                     return subprocess.CompletedProcess(args=command, returncode=0, stdout=stdout, stderr=stderr)
                 current_execution_activity_marker = self._path_activity_marker_list_get(activity_path_list)
                 if partial_stdout_changed or current_execution_activity_marker != execution_activity_marker:
@@ -588,6 +633,12 @@ class CodexRunner:
                     continue
                 self._process_group_kill(process)
                 stdout, stderr = process.communicate()
+                self._event_stdout_append(
+                    event_path=diagnostic_dir / "event.jsonl",
+                    final=True,
+                    persisted_stdout_offset=persisted_stdout_offset,
+                    stdout_snapshot=stdout,
+                )
                 timeout_stderr = (
                     f"{stderr}\nCodex exec timed out after {CODEX_EXEC_INACTIVITY_TIMEOUT_SECONDS} seconds "
                     "without execution artifact activity.\n"

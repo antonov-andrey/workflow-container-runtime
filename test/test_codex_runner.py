@@ -236,6 +236,7 @@ def test_codex_runner_rejects_node_api_in_browser_page_javascript(
             },
             "type": "item.started",
         }
+        (diagnostic_dir / "event.jsonl").write_text(json.dumps(event_payload), encoding="utf-8")
         return subprocess.CompletedProcess(args=command, returncode=0, stdout=json.dumps(event_payload), stderr="")
 
     monkeypatch.setattr(CodexRunner, "_subprocess_run", fake_subprocess_run)
@@ -412,6 +413,71 @@ def test_codex_subprocess_terminates_after_partial_completed_event(
 
     assert completed_process.returncode == 0
     assert (diagnostic_dir / "event.jsonl").read_text(encoding="utf-8") == '{"type":"turn.completed"}\n'
+
+
+def test_codex_subprocess_appends_cumulative_jsonl_snapshots_without_loss_or_duplication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Persist each complete event exactly once across polling and final completion."""
+
+    class CumulativeOutputProcess:
+        """Process double that exposes growing cumulative stdout snapshots."""
+
+        pid = 102
+        returncode: int | None = None
+
+        def __init__(self) -> None:
+            """Initialize the poll snapshot sequence."""
+
+            self._stdout_snapshot_list = [
+                '{"type":"item.started"}\n',
+                '{"type":"item.started"}\n{"type":"item.updated"}\n',
+            ]
+            self._stdout_final = '{"type":"item.started"}\n{"type":"item.updated"}\n{"type":"turn.completed"}\n'
+
+        def communicate(self, input: str | None = None, timeout: int | None = None) -> tuple[str, str]:
+            """Return cumulative stdout through polls, then through process completion.
+
+            Args:
+                input: Prompt text for the first poll.
+                timeout: Poll timeout.
+
+            Returns:
+                Final cumulative stdout and empty stderr.
+
+            Raises:
+                TimeoutExpired: While one partial cumulative snapshot remains.
+            """
+
+            _ = input
+            if timeout is not None and self._stdout_snapshot_list:
+                raise subprocess.TimeoutExpired(
+                    cmd=["codex"],
+                    timeout=timeout,
+                    output=self._stdout_snapshot_list.pop(0),
+                    stderr="",
+                )
+            self.returncode = 0
+            return self._stdout_final, ""
+
+    diagnostic_dir = tmp_path / "workflow" / "run" / "step" / "example" / "diagnostics" / "attempt_001"
+    diagnostic_dir.mkdir(parents=True)
+    process = CumulativeOutputProcess()
+    monkeypatch.setattr(codex_runner.subprocess, "Popen", lambda *args, **kwargs: process)
+
+    completed_process = _runner_get()._subprocess_run(
+        ["codex"],
+        browser_artifact_activity=False,
+        diagnostic_dir=diagnostic_dir,
+        input="prompt",
+        working_directory=tmp_path,
+    )
+
+    assert completed_process.returncode == 0
+    assert (diagnostic_dir / "event.jsonl").read_text(encoding="utf-8") == (
+        '{"type":"item.started"}\n{"type":"item.updated"}\n{"type":"turn.completed"}\n'
+    )
 
 
 def test_codex_runner_watches_browser_tree_for_step_owner(tmp_path: Path) -> None:
