@@ -29,6 +29,7 @@ PLAYWRIGHT_MCP_APPROVED_TOOL_LIST = [
     "browser_navigate",
     "browser_resize",
     "browser_snapshot",
+    "browser_take_screenshot",
     "browser_tabs",
 ]
 BROWSER_JAVASCRIPT_FORBIDDEN_PATTERN_LIST = [

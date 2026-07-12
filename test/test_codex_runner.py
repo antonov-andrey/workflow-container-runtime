@@ -183,6 +183,7 @@ def test_codex_runner_uses_browser_capability_and_writes_first_attempt_diagnosti
     assert 'model_reasoning_effort="high"' in command_text
     assert "mcp_servers.playwright.url='http://127.0.0.1:8931/mcp'" in command_text
     assert 'mcp_servers.playwright.tools.browser_close.approval_mode="approve"' in command_text
+    assert 'mcp_servers.playwright.tools.browser_take_screenshot.approval_mode="approve"' in command_text
     schema_path = tmp_path / "workflow" / "step" / "diagnostics" / "action" / "attempt_001" / "schema.json"
     schema_payload = json.loads(schema_path.read_text(encoding="utf-8"))
     assert schema_payload["required"] == ["message", "status", "warning_list"]
