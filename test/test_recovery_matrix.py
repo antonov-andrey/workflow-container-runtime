@@ -650,6 +650,71 @@ def test_codex_concurrent_public_methods_prioritize_infrastructure_error_over_va
     assert set(completed_value_list) == set(value_list)
 
 
+def test_codex_concurrent_step_preserves_validation_outcomes_and_raises_lowest_index_feedback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Keep validation-only feedback ordered after concurrent completion and re-raise the first invocation feedback."""
+
+    completed_value_list: list[str] = []
+    started_value_list: list[str] = []
+
+    async def run_step_async(
+        options: dict[str, str],
+        func: object,
+        execution_context: WorkflowStepExecutionContext,
+        input_source: RecoveryStepInputSource,
+        workflow_step_config: RecoveryConcurrentStepConfig,
+    ) -> RecoveryStepResult:
+        """Complete two validation failures in reverse input order and one successful peer."""
+
+        _ = options
+        _ = func
+        _ = execution_context
+        _ = workflow_step_config
+        started_value_list.append(input_source.value)
+        if input_source.value == "validation_first":
+            await asyncio.sleep(0.02)
+            completed_value_list.append(input_source.value)
+            raise StepResultValidationError(feedback_list=["Correct the first result."])
+        if input_source.value == "validation_second":
+            await asyncio.sleep(0)
+            completed_value_list.append(input_source.value)
+            raise StepResultValidationError(feedback_list=["Correct the second result."])
+        await asyncio.sleep(0.01)
+        completed_value_list.append(input_source.value)
+        return RecoveryStepResult(output=input_source.value)
+
+    value_list = ["validation_first", "validation_second", "success"]
+    monkeypatch.setattr(DBOS, "run_step_async", run_step_async)
+    outcome_list = asyncio.run(
+        _concurrent_step_get(tmp_path).run_outcome_list(
+            _concurrent_invocation_list_get(_step_context_get(tmp_path), value_list),
+            _concurrent_config_get(),
+        )
+    )
+
+    assert [outcome.validation_feedback_tuple for outcome in outcome_list] == [
+        ("Correct the first result.",),
+        ("Correct the second result.",),
+        (),
+    ]
+    assert started_value_list == value_list
+    assert set(completed_value_list) == set(value_list)
+
+    with pytest.raises(StepResultValidationError, match="Correct the first result") as error:
+        asyncio.run(
+            _concurrent_step_get(tmp_path).run_list(
+                _concurrent_invocation_list_get(_step_context_get(tmp_path), value_list),
+                _concurrent_config_get(),
+            )
+        )
+
+    assert error.value.feedback_list == ["Correct the first result."]
+    assert started_value_list == value_list * 2
+    assert all(completed_value_list.count(value) == 2 for value in value_list)
+
+
 @pytest.mark.parametrize("method_name", ["run_list", "run_outcome_list"])
 @pytest.mark.parametrize(
     ("case", "message"),
