@@ -8,6 +8,7 @@ from workflow_container_runtime.step.base import (
     WorkflowStepCodexConcurrentBase,
     WorkflowStepCodexBase,
     WorkflowStepDeterministicBase,
+    WorkflowStepInvocationOutcome,
 )
 from workflow_container_runtime.step.browser import BrowserActionResult, BrowsingError
 from workflow_container_runtime.step.codex import (
@@ -34,4 +35,5 @@ __all__ = [
     "WorkflowStepDeterministicBase",
     "WorkflowStepExecutionContext",
     "WorkflowStepInvocation",
+    "WorkflowStepInvocationOutcome",
 ]

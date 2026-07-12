@@ -4,6 +4,7 @@ import asyncio
 import json
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, Generic, TypeVar, cast, final
 
@@ -53,6 +54,14 @@ class StepResultValidationError(RuntimeError):
             raise ValueError("step result validation feedback must not be empty")
         super().__init__("; ".join(feedback_list))
         self.feedback_list = feedback_list
+
+
+@dataclass(frozen=True)
+class WorkflowStepInvocationOutcome(Generic[ResultT]):
+    """Represent one concurrent invocation success or exhausted validation failure."""
+
+    result: ResultT | None
+    validation_error: StepResultValidationError | None
 
 
 class WorkflowStepBase(ABC, Generic[InputSourceT, InputT, ResultT]):
@@ -863,6 +872,58 @@ class WorkflowStepCodexConcurrentBase(
             BaseException: The lowest-index invocation error after all work completes.
         """
 
+        outcome_list = await self.run_outcome_list(invocation_list, workflow_step_config)
+        for outcome in outcome_list:
+            if outcome.validation_error is not None:
+                raise outcome.validation_error
+        return [cast(ResultT, outcome.result) for outcome in outcome_list]
+
+    @final
+    async def run_outcome_list(
+        self,
+        invocation_list: list[WorkflowStepInvocation[InputSourceT]],
+        workflow_step_config: WorkflowStepCodexConcurrentConfigT,
+    ) -> list[WorkflowStepInvocationOutcome[ResultT]]:
+        """Run a validated concurrent group while preserving exhausted validation failures in order."""
+
+        self._invocation_list_validate(invocation_list, workflow_step_config)
+        semaphore = asyncio.Semaphore(workflow_step_config.concurrency)
+
+        async def invocation_result_get(invocation: WorkflowStepInvocation[InputSourceT]) -> ResultT:
+            """Run one DBOS step while holding one scheduler slot."""
+
+            async with semaphore:
+                return await DBOS.run_step_async(
+                    {"name": f"{type(self).__name__}.run"},
+                    self.run,
+                    invocation.execution_context,
+                    invocation.input_source,
+                    workflow_step_config,
+                )
+
+        result_or_error_list = await asyncio.gather(
+            *(asyncio.create_task(invocation_result_get(invocation)) for invocation in invocation_list),
+            return_exceptions=True,
+        )
+        outcome_list: list[WorkflowStepInvocationOutcome[ResultT]] = []
+        for result_or_error in result_or_error_list:
+            if isinstance(result_or_error, StepResultValidationError):
+                outcome_list.append(WorkflowStepInvocationOutcome(result=None, validation_error=result_or_error))
+            elif isinstance(result_or_error, BaseException):
+                raise result_or_error
+            else:
+                outcome_list.append(
+                    WorkflowStepInvocationOutcome(result=cast(ResultT, result_or_error), validation_error=None)
+                )
+        return outcome_list
+
+    def _invocation_list_validate(
+        self,
+        invocation_list: list[WorkflowStepInvocation[InputSourceT]],
+        workflow_step_config: WorkflowStepCodexConcurrentConfigT,
+    ) -> None:
+        """Validate the shared result root, workflow input, and unique step identities."""
+
         if not invocation_list:
             raise ValueError("invocation_list must not be empty")
         self._workflow_step_config_type_validate(workflow_step_config)
@@ -882,33 +943,3 @@ class WorkflowStepCodexConcurrentBase(
             except ValueError as exc:
                 raise ValueError("every step_instance_dir must be inside result_dir") from exc
             step_instance_dir_set.add(step_instance_dir)
-
-        semaphore = asyncio.Semaphore(workflow_step_config.concurrency)
-
-        async def invocation_result_get(invocation: WorkflowStepInvocation[InputSourceT]) -> ResultT:
-            """Run one DBOS step while holding one scheduler slot.
-
-            Args:
-                invocation: Independent step context and public input source.
-
-            Returns:
-                Accepted public result for the invocation.
-            """
-
-            async with semaphore:
-                return await DBOS.run_step_async(
-                    {"name": f"{type(self).__name__}.run"},
-                    self.run,
-                    invocation.execution_context,
-                    invocation.input_source,
-                    workflow_step_config,
-                )
-
-        result_or_error_list = await asyncio.gather(
-            *(asyncio.create_task(invocation_result_get(invocation)) for invocation in invocation_list),
-            return_exceptions=True,
-        )
-        for result_or_error in result_or_error_list:
-            if isinstance(result_or_error, BaseException):
-                raise result_or_error
-        return cast(list[ResultT], result_or_error_list)
