@@ -3,22 +3,45 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager
 import inspect
+import json
+from pathlib import Path
 from threading import Event
 from typing import get_type_hints
 from urllib.parse import parse_qsl, urlsplit
 
 import pytest
-from pydantic import ValidationError
-from workflow_container_contract import McpPlaywrightProfileWritebackPolicy
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from workflow_container_contract import McpPlaywrightProfileWritebackPolicy, WorkflowInputSchema
 
 from workflow_container_runtime.capability import BrowserRuntimeCapability, WorkflowRuntimeCapability
 from workflow_container_runtime.mcp_playwright_profile import McpPlaywrightProfileRoute, McpPlaywrightProfileRuntime
 from workflow_container_runtime.step import WorkflowStepCodexConfigBase
-from workflow_container_runtime.workflow import WorkflowBrowserConfigBase
+from workflow_container_runtime.workflow import WorkflowBrowserConfigBase, WorkflowInputBase
 
 
 class ExampleWorkflowBrowserConfig(WorkflowBrowserConfigBase):
     """Provide one concrete browser-backed workflow config."""
+
+
+class ExampleWorkflowBrowserRequest(BaseModel):
+    """Provide one minimal concrete workflow request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(description="Requested browser work.", title="Text")
+
+
+class ExampleWorkflowBrowserInput(WorkflowInputBase[ExampleWorkflowBrowserRequest, ExampleWorkflowBrowserConfig]):
+    """Expose the shared browser config through one generated input schema."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        json_schema_extra={"$schema": "https://json-schema.org/draft/2020-12/schema"},
+        strict=True,
+        validate_assignment=True,
+        validate_default=True,
+    )
 
 
 class ExampleStepConfig(WorkflowStepCodexConfigBase):
@@ -97,6 +120,19 @@ def test_browser_capability_and_workflow_config_require_complete_profile_contrac
     )
 
     assert config.mcp_playwright_profile_writeback_policy.mcp_playwright_profile_name_prefix == "source-"
+
+
+def test_browser_workflow_config_generates_valid_input_schema(tmp_path: Path) -> None:
+    """Keep inherited browser config fields valid in generated public input schemas.
+
+    Args:
+        tmp_path: Isolated schema directory.
+    """
+
+    schema_path = tmp_path / "input.schema.json"
+    schema_path.write_text(json.dumps(ExampleWorkflowBrowserInput.model_json_schema()), encoding="utf-8")
+
+    WorkflowInputSchema.from_path(schema_path)
 
 
 @pytest.mark.parametrize(

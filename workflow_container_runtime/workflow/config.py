@@ -24,7 +24,10 @@ class WorkflowConfigBase(BaseModel):
 class WorkflowBrowserConfigBase(WorkflowConfigBase):
     """Add explicit Playwright profile writeback policy to one workflow."""
 
-    mcp_playwright_profile_writeback_policy: McpPlaywrightProfileWritebackPolicy
+    mcp_playwright_profile_writeback_policy: McpPlaywrightProfileWritebackPolicy = Field(
+        description="Policy for publishing named Playwright profiles back to the workflow input source.",
+        title="Playwright profile writeback policy",
+    )
 
 
 class WorkflowInputBase(BaseModel, Generic[RequestT, WorkflowConfigT]):
