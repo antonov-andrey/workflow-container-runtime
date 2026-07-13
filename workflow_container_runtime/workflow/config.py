@@ -3,6 +3,7 @@
 from typing import Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
+from workflow_container_contract import McpPlaywrightProfileWritebackPolicy
 
 RequestT = TypeVar("RequestT", bound=BaseModel)
 WorkflowConfigT = TypeVar("WorkflowConfigT", bound="WorkflowConfigBase")
@@ -18,6 +19,12 @@ class WorkflowConfigBase(BaseModel):
         json_schema_extra={"default": "", "x-ui-control": "textarea"},
         title="Workflow instruction",
     )
+
+
+class WorkflowBrowserConfigBase(WorkflowConfigBase):
+    """Add explicit Playwright profile writeback policy to one workflow."""
+
+    mcp_playwright_profile_writeback_policy: McpPlaywrightProfileWritebackPolicy
 
 
 class WorkflowInputBase(BaseModel, Generic[RequestT, WorkflowConfigT]):

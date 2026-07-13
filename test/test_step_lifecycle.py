@@ -9,7 +9,9 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from workflow_container_runtime.artifact.materializer import ArtifactMaterializationPolicy, ArtifactMaterializer
 from workflow_container_runtime.artifact.writer import JsonArtifactWriter
+from workflow_container_runtime.capability import BrowserRuntimeCapability
 from workflow_container_runtime.codex.config import CodexRunnerConfig
+from workflow_container_runtime.mcp_playwright_profile import McpPlaywrightProfileRuntime
 from workflow_container_runtime.prompt.renderer import PromptRenderer
 from workflow_container_runtime.step.base import (
     StepResultValidationError,
@@ -201,6 +203,8 @@ class ExampleCodexStep(
 EXAMPLE_STEP_CONFIG = ExampleStepConfig(
     correction_attempt_limit=2,
     instruction="",
+    mcp_playwright_profile=None,
+    mcp_playwright_profile_source=None,
     model="gpt-5.6-terra",
     reasoning_effort="high",
 )
@@ -210,7 +214,12 @@ EXAMPLE_RUNTIME_POLICY = WorkflowStepCodexRuntimePolicy(
 )
 
 
-def _context_get(tmp_path: Path) -> WorkflowStepExecutionContext:
+def _context_get(
+    tmp_path: Path,
+    *,
+    runtime_capability: WorkflowRuntimeCapability | None = None,
+    workflow_step_config: ExampleStepConfig = EXAMPLE_STEP_CONFIG,
+) -> WorkflowStepExecutionContext:
     """Return one step execution context."""
 
     workflow_instance_dir = tmp_path / "workflow" / "run"
@@ -219,14 +228,14 @@ def _context_get(tmp_path: Path) -> WorkflowStepExecutionContext:
         ExampleWorkflowInput(
             config=ExampleWorkflowConfig(
                 instruction="",
-                step_map=ExampleStepConfigMap(example_build=EXAMPLE_STEP_CONFIG),
+                step_map=ExampleStepConfigMap(example_build=workflow_step_config),
             ),
             request=ExampleInputSource(value="workflow"),
         ),
     )
     return WorkflowStepExecutionContext(
         result_dir=tmp_path,
-        runtime_capability=WorkflowRuntimeCapability(browser=None),
+        runtime_capability=runtime_capability or WorkflowRuntimeCapability(browser=None),
         step_instance_dir=workflow_instance_dir / "step" / "example_build",
         workflow_input_path=Path("workflow/run/input.json"),
     )
@@ -291,12 +300,15 @@ def test_codex_step_requires_the_exact_persisted_workflow_config(tmp_path: Path)
         artifact_materializer=ArtifactMaterializer(),
         artifact_writer=JsonArtifactWriter(),
         codex_runner=FakeCodexRunner([]),
+        mcp_playwright_profile_runtime=McpPlaywrightProfileRuntime(),
         prompt_renderer=_prompt_renderer_get(tmp_path / "template"),
         runtime_policy=EXAMPLE_RUNTIME_POLICY,
     )
     mismatched_config = ExampleStepConfig(
         correction_attempt_limit=1,
         instruction="",
+        mcp_playwright_profile=None,
+        mcp_playwright_profile_source=None,
         model="gpt-5.6-terra",
         reasoning_effort="high",
     )
@@ -315,6 +327,7 @@ def test_codex_step_revalidates_model_copy_context_before_step_side_effects(tmp_
         artifact_materializer=ArtifactMaterializer(),
         artifact_writer=JsonArtifactWriter(),
         codex_runner=FakeCodexRunner([]),
+        mcp_playwright_profile_runtime=McpPlaywrightProfileRuntime(),
         prompt_renderer=_prompt_renderer_get(tmp_path / "template"),
         runtime_policy=EXAMPLE_RUNTIME_POLICY,
     )
@@ -353,6 +366,7 @@ def test_codex_step_retries_mechanical_and_semantic_failures(tmp_path: Path) -> 
         artifact_materializer=ArtifactMaterializer(),
         artifact_writer=JsonArtifactWriter(),
         codex_runner=fake_runner,
+        mcp_playwright_profile_runtime=McpPlaywrightProfileRuntime(),
         prompt_renderer=_prompt_renderer_get(tmp_path / "template"),
         runtime_policy=EXAMPLE_RUNTIME_POLICY,
     )
@@ -388,6 +402,7 @@ def test_codex_step_recovers_success_without_external_call(tmp_path: Path) -> No
         artifact_materializer=ArtifactMaterializer(),
         artifact_writer=JsonArtifactWriter(),
         codex_runner=fake_runner,
+        mcp_playwright_profile_runtime=McpPlaywrightProfileRuntime(),
         prompt_renderer=_prompt_renderer_get(tmp_path / "template"),
         runtime_policy=EXAMPLE_RUNTIME_POLICY,
     )
@@ -397,6 +412,128 @@ def test_codex_step_recovers_success_without_external_call(tmp_path: Path) -> No
     assert step.run(context, input_source, EXAMPLE_STEP_CONFIG) == ExampleStepResult(output="final")
     assert step.run(context, input_source, EXAMPLE_STEP_CONFIG) == ExampleStepResult(output="final")
     assert len(fake_runner.call_list) == 2
+
+
+def test_codex_step_routes_phases_and_republishes_recovered_candidate(tmp_path: Path) -> None:
+    """Route each phase correctly and republish the candidate before recovery returns."""
+
+    request_list: list[object] = []
+
+    class CandidateResponse:
+        """Return one successful platform candidate response."""
+
+        status = 204
+
+        def __enter__(self) -> "CandidateResponse":
+            """Enter the fake response context."""
+
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            """Leave the fake response context."""
+
+    def urlopen(request: object) -> CandidateResponse:
+        """Record one candidate publication."""
+
+        request_list.append(request)
+        return CandidateResponse()
+
+    config = ExampleStepConfig(
+        correction_attempt_limit=1,
+        instruction="",
+        mcp_playwright_profile="source-discover",
+        mcp_playwright_profile_source="login-completed",
+        model="gpt-5.6-terra",
+        reasoning_effort="high",
+    )
+    runtime_capability = WorkflowRuntimeCapability(
+        browser=BrowserRuntimeCapability(
+            mcp_playwright_profile_source="data-source-profile",
+            mcp_playwright_profile_writeback_candidate_url="http://platform/candidate",
+            mcp_url="http://browser:8931/mcp",
+        )
+    )
+    fake_runner = FakeCodexRunner(
+        [ExampleActionOutput(output="final"), VerificationDecision(status="success", feedback_list=[])]
+    )
+    step = ExampleCodexStep(
+        artifact_materializer=ArtifactMaterializer(),
+        artifact_writer=JsonArtifactWriter(),
+        codex_runner=fake_runner,
+        mcp_playwright_profile_runtime=McpPlaywrightProfileRuntime(urlopen=urlopen),
+        prompt_renderer=_prompt_renderer_get(tmp_path / "template"),
+        runtime_policy=EXAMPLE_RUNTIME_POLICY,
+    )
+    context = _context_get(tmp_path, runtime_capability=runtime_capability, workflow_step_config=config)
+
+    assert step.run(context, ExampleInputSource(value="text"), config) == ExampleStepResult(output="final")
+    assert step.run(context, ExampleInputSource(value="text"), config) == ExampleStepResult(output="final")
+
+    action_browser = fake_runner.call_list[0]["runtime_capability"].browser
+    verification_browser = fake_runner.call_list[1]["runtime_capability"].browser
+    assert action_browser.mcp_url.endswith("?profile=source-discover&profile_source=login-completed")
+    assert verification_browser.mcp_url.endswith("?profile=source-discover")
+    assert len(fake_runner.call_list) == 2
+    assert len(request_list) == 2
+
+
+def test_candidate_publication_failure_propagates_and_recovery_retries_publication(tmp_path: Path) -> None:
+    """Keep candidate failures out of correction feedback and retry publication on recovery."""
+
+    status_list = [500, 204]
+
+    class CandidateResponse:
+        """Return one scripted platform candidate status."""
+
+        def __init__(self, status: int) -> None:
+            """Store the scripted status."""
+
+            self.status = status
+
+        def __enter__(self) -> "CandidateResponse":
+            """Enter the fake response context."""
+
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            """Leave the fake response context."""
+
+    config = ExampleStepConfig(
+        correction_attempt_limit=1,
+        instruction="",
+        mcp_playwright_profile="source-discover",
+        mcp_playwright_profile_source=None,
+        model="gpt-5.6-terra",
+        reasoning_effort="high",
+    )
+    runtime_capability = WorkflowRuntimeCapability(
+        browser=BrowserRuntimeCapability(
+            mcp_playwright_profile_source="data-source-profile",
+            mcp_playwright_profile_writeback_candidate_url="http://platform/candidate",
+            mcp_url="http://browser:8931/mcp",
+        )
+    )
+    fake_runner = FakeCodexRunner(
+        [ExampleActionOutput(output="final"), VerificationDecision(status="success", feedback_list=[])]
+    )
+    step = ExampleCodexStep(
+        artifact_materializer=ArtifactMaterializer(),
+        artifact_writer=JsonArtifactWriter(),
+        codex_runner=fake_runner,
+        mcp_playwright_profile_runtime=McpPlaywrightProfileRuntime(
+            urlopen=lambda request: CandidateResponse(status_list.pop(0))
+        ),
+        prompt_renderer=_prompt_renderer_get(tmp_path / "template"),
+        runtime_policy=EXAMPLE_RUNTIME_POLICY,
+    )
+    context = _context_get(tmp_path, runtime_capability=runtime_capability, workflow_step_config=config)
+
+    with pytest.raises(RuntimeError, match="expected 204"):
+        step.run(context, ExampleInputSource(value="text"), config)
+
+    assert step.run(context, ExampleInputSource(value="text"), config) == ExampleStepResult(output="final")
+    assert len(fake_runner.call_list) == 2
+    assert status_list == []
 
 
 @pytest.mark.parametrize("step_kind", ("deterministic", "codex"))
@@ -423,6 +560,7 @@ def test_step_rejects_missing_input_for_started_instance(
             artifact_materializer=ArtifactMaterializer(),
             artifact_writer=JsonArtifactWriter(),
             codex_runner=FakeCodexRunner([]),
+            mcp_playwright_profile_runtime=McpPlaywrightProfileRuntime(),
             prompt_renderer=_prompt_renderer_get(tmp_path / "template"),
             runtime_policy=EXAMPLE_RUNTIME_POLICY,
         )
@@ -544,6 +682,7 @@ def test_codex_step_keeps_previous_verdict_while_publishing_result(tmp_path: Pat
         codex_runner=FakeCodexRunner(
             [ExampleActionOutput(output="final"), VerificationDecision(status="success", feedback_list=[])]
         ),
+        mcp_playwright_profile_runtime=McpPlaywrightProfileRuntime(),
         prompt_renderer=_prompt_renderer_get(tmp_path / "template"),
         runtime_policy=EXAMPLE_RUNTIME_POLICY,
     )
@@ -661,6 +800,7 @@ def test_codex_step_restarts_verification_after_result_publication_without_repea
         artifact_materializer=ArtifactMaterializer(),
         artifact_writer=CrashAfterResultWriter(),
         codex_runner=fake_runner,
+        mcp_playwright_profile_runtime=McpPlaywrightProfileRuntime(),
         prompt_renderer=_prompt_renderer_get(tmp_path / "template"),
         runtime_policy=EXAMPLE_RUNTIME_POLICY,
     )
@@ -751,6 +891,7 @@ def test_codex_step_rejects_state_with_wrong_declared_model(tmp_path: Path) -> N
         artifact_materializer=ArtifactMaterializer(),
         artifact_writer=JsonArtifactWriter(),
         codex_runner=FakeCodexRunner([]),
+        mcp_playwright_profile_runtime=McpPlaywrightProfileRuntime(),
         prompt_renderer=_prompt_renderer_get(tmp_path / "template"),
         runtime_policy=EXAMPLE_RUNTIME_POLICY,
     )

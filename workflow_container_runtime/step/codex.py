@@ -2,9 +2,10 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from workflow_container_runtime.artifact.materializer import ArtifactMaterializationPolicy
+from workflow_container_runtime.mcp_playwright_profile import mcp_playwright_profile_name_validate
 from workflow_container_runtime.retry import CodexExecutionRetryPolicy
 
 WorkflowCodexModel = Literal["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"]
@@ -27,6 +28,16 @@ class WorkflowStepCodexConfigBase(BaseModel):
         json_schema_extra={"default": "", "x-ui-control": "textarea"},
         title="Step instruction",
     )
+    mcp_playwright_profile: str | None = Field(
+        description="Run-local logical Playwright target profile, or null for isolated execution.",
+        json_schema_extra={"default": None},
+        title="Playwright profile",
+    )
+    mcp_playwright_profile_source: str | None = Field(
+        description="Exact completed run-local physical profile copied into the target before every action call.",
+        json_schema_extra={"default": None},
+        title="Playwright profile source",
+    )
     model: WorkflowCodexModel = Field(
         description="Codex model used by action and verifier.",
         json_schema_extra={"default": "gpt-5.6-terra"},
@@ -37,6 +48,26 @@ class WorkflowStepCodexConfigBase(BaseModel):
         json_schema_extra={"default": "high"},
         title="Reasoning effort",
     )
+
+    @field_validator("mcp_playwright_profile", "mcp_playwright_profile_source")
+    @classmethod
+    def profile_name_validate(cls, value: str | None) -> str | None:
+        """Require a non-empty profile identifier without path or query syntax."""
+
+        return None if value is None else mcp_playwright_profile_name_validate(value)
+
+    @model_validator(mode="after")
+    def profile_relationship_validate(self) -> "WorkflowStepCodexConfigBase":
+        """Require a distinct target whenever an explicit source is configured."""
+
+        if self.mcp_playwright_profile_source is not None and self.mcp_playwright_profile is None:
+            raise ValueError("Playwright profile source requires a target profile")
+        if (
+            self.mcp_playwright_profile_source == self.mcp_playwright_profile
+            and self.mcp_playwright_profile is not None
+        ):
+            raise ValueError("Playwright profile source and target must differ")
+        return self
 
 
 class WorkflowStepCodexConcurrentConfigBase(WorkflowStepCodexConfigBase):

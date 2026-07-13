@@ -17,6 +17,7 @@ from workflow_container_runtime.artifact import (
 )
 from workflow_container_runtime.capability import BrowserRuntimeCapability
 from workflow_container_runtime.codex import CodexExecutionError
+from workflow_container_runtime.mcp_playwright_profile import McpPlaywrightProfileRuntime
 from workflow_container_runtime.prompt.renderer import PromptRenderer
 from workflow_container_runtime.step import (
     CodexExecutionRetryPolicy,
@@ -123,6 +124,8 @@ class RecoveryRecord(RecoveryModel):
 RECOVERY_STEP_CONFIG = RecoveryStepConfig(
     correction_attempt_limit=2,
     instruction="",
+    mcp_playwright_profile=None,
+    mcp_playwright_profile_source=None,
     model="gpt-5.6-terra",
     reasoning_effort="high",
 )
@@ -335,6 +338,7 @@ def _codex_step_get(
         artifact_materializer=ArtifactMaterializer(),
         artifact_writer=writer,
         codex_runner=codex_runner,
+        mcp_playwright_profile_runtime=McpPlaywrightProfileRuntime(),
         prompt_renderer=PromptRenderer(template_dir=template_dir),
         runtime_policy=RECOVERY_RUNTIME_POLICY,
     )
@@ -386,6 +390,7 @@ def _concurrent_step_get(tmp_path: Path) -> RecoveryConcurrentCodexStep:
         artifact_materializer=ArtifactMaterializer(),
         artifact_writer=JsonArtifactWriter(),
         codex_runner=ScriptedCodexRunner([]),
+        mcp_playwright_profile_runtime=McpPlaywrightProfileRuntime(),
         prompt_renderer=PromptRenderer(template_dir=tmp_path / "template"),
         runtime_policy=RECOVERY_RUNTIME_POLICY,
     )
@@ -402,6 +407,8 @@ def _concurrent_config_get() -> RecoveryConcurrentStepConfig:
         concurrency=2,
         correction_attempt_limit=0,
         instruction="",
+        mcp_playwright_profile=None,
+        mcp_playwright_profile_source=None,
         model="gpt-5.6-terra",
         reasoning_effort="high",
     )
@@ -484,6 +491,7 @@ def test_codex_concurrent_step_outcome_list_preserves_order_feedback_and_bound(
         execution_context: WorkflowStepExecutionContext,
         input_source: RecoveryStepInputSource,
         workflow_step_config: RecoveryConcurrentStepConfig,
+        mcp_playwright_profile: str | None,
     ) -> RecoveryStepResult:
         """Return one success or exhausted correction after a deliberate completion delay."""
 
@@ -529,6 +537,7 @@ def test_codex_concurrent_step_run_list_raises_rebuilt_validation_error(
         execution_context: WorkflowStepExecutionContext,
         input_source: RecoveryStepInputSource,
         workflow_step_config: RecoveryConcurrentStepConfig,
+        mcp_playwright_profile: str | None,
     ) -> RecoveryStepResult:
         """Raise one exhausted correction through the real scheduler boundary."""
 
@@ -568,6 +577,7 @@ def test_codex_concurrent_step_outcome_list_propagates_infrastructure_error(
         execution_context: WorkflowStepExecutionContext,
         input_source: RecoveryStepInputSource,
         workflow_step_config: RecoveryConcurrentStepConfig,
+        mcp_playwright_profile: str | None,
     ) -> RecoveryStepResult:
         """Complete peer work before one planned infrastructure failure propagates."""
 
@@ -615,6 +625,7 @@ def test_codex_concurrent_public_methods_prioritize_infrastructure_error_over_va
         execution_context: WorkflowStepExecutionContext,
         input_source: RecoveryStepInputSource,
         workflow_step_config: RecoveryConcurrentStepConfig,
+        mcp_playwright_profile: str | None,
     ) -> RecoveryStepResult:
         """Complete one peer, exhaust one validation, or raise one planned infrastructure failure."""
 
@@ -665,6 +676,7 @@ def test_codex_concurrent_step_preserves_validation_outcomes_and_raises_lowest_i
         execution_context: WorkflowStepExecutionContext,
         input_source: RecoveryStepInputSource,
         workflow_step_config: RecoveryConcurrentStepConfig,
+        mcp_playwright_profile: str | None,
     ) -> RecoveryStepResult:
         """Complete two validation failures in reverse input order and one successful peer."""
 
@@ -790,6 +802,7 @@ def test_codex_concurrent_step_returns_input_order_with_bounded_dbos_dispatch(
         execution_context: WorkflowStepExecutionContext,
         input_source: RecoveryStepInputSource,
         workflow_step_config: RecoveryConcurrentStepConfig,
+        mcp_playwright_profile: str | None,
     ) -> RecoveryStepResult:
         """Model one checkpointed DBOS step with deliberately different completion order."""
 
@@ -810,6 +823,7 @@ def test_codex_concurrent_step_returns_input_order_with_bounded_dbos_dispatch(
         artifact_materializer=ArtifactMaterializer(),
         artifact_writer=JsonArtifactWriter(),
         codex_runner=ScriptedCodexRunner([]),
+        mcp_playwright_profile_runtime=McpPlaywrightProfileRuntime(),
         prompt_renderer=PromptRenderer(template_dir=tmp_path / "template"),
         runtime_policy=RECOVERY_RUNTIME_POLICY,
     )
@@ -817,6 +831,8 @@ def test_codex_concurrent_step_returns_input_order_with_bounded_dbos_dispatch(
         concurrency=2,
         correction_attempt_limit=0,
         instruction="",
+        mcp_playwright_profile=None,
+        mcp_playwright_profile_source=None,
         model="gpt-5.6-terra",
         reasoning_effort="high",
     )
@@ -840,11 +856,11 @@ def test_codex_concurrent_step_returns_input_order_with_bounded_dbos_dispatch(
     assert max_active_count == 2
 
 
-def test_codex_concurrent_step_serializes_one_shared_browser_endpoint(
+def test_codex_concurrent_step_does_not_serialize_one_shared_browser_endpoint(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Prevent concurrent invocations from controlling one shared browser context."""
+    """Allow fixed lanes to use distinct profiles through one shared router URL."""
 
     active_count = 0
     max_active_count = 0
@@ -855,6 +871,7 @@ def test_codex_concurrent_step_serializes_one_shared_browser_endpoint(
         execution_context: WorkflowStepExecutionContext,
         input_source: RecoveryStepInputSource,
         workflow_step_config: RecoveryConcurrentStepConfig,
+        mcp_playwright_profile: str | None,
     ) -> RecoveryStepResult:
         """Record simultaneous DBOS dispatch for one browser endpoint."""
 
@@ -873,7 +890,11 @@ def test_codex_concurrent_step_serializes_one_shared_browser_endpoint(
     context = _step_context_get(tmp_path).model_copy(
         update={
             "runtime_capability": WorkflowRuntimeCapability(
-                browser=BrowserRuntimeCapability(mcp_url="http://browser-mcp:8931/mcp")
+                browser=BrowserRuntimeCapability(
+                    mcp_playwright_profile_source="data-source-profile",
+                    mcp_playwright_profile_writeback_candidate_url="http://platform/candidate",
+                    mcp_url="http://browser-mcp:8931/mcp",
+                )
             )
         }
     )
@@ -881,7 +902,111 @@ def test_codex_concurrent_step_serializes_one_shared_browser_endpoint(
 
     asyncio.run(_concurrent_step_get(tmp_path).run_list(invocation_list, _concurrent_config_get()))
 
-    assert max_active_count == 1
+    assert max_active_count == 2
+
+
+def test_concurrent_step_uses_fixed_profile_lanes_in_original_order(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Assign round-robin physical profiles and run each fixed lane sequentially."""
+
+    active_by_profile_map: dict[str, int] = {}
+    max_active_by_profile_map: dict[str, int] = {}
+    profile_by_value_map: dict[str, str] = {}
+
+    async def run_step_async(
+        options: dict[str, str],
+        func: object,
+        execution_context: WorkflowStepExecutionContext,
+        input_source: RecoveryStepInputSource,
+        workflow_step_config: RecoveryConcurrentStepConfig,
+        mcp_playwright_profile: str | None,
+    ) -> RecoveryStepResult:
+        """Record the physical profile bound into one lane-owned DBOS callable."""
+
+        _ = options
+        _ = execution_context
+        _ = workflow_step_config
+        assert getattr(func, "__self__", None) is step
+        assert getattr(func, "__name__", None) == "_run_with_profile"
+        profile = mcp_playwright_profile
+        profile_by_value_map[input_source.value] = profile
+        active_by_profile_map[profile] = active_by_profile_map.get(profile, 0) + 1
+        max_active_by_profile_map[profile] = max(
+            max_active_by_profile_map.get(profile, 0),
+            active_by_profile_map[profile],
+        )
+        await asyncio.sleep(0.01 if input_source.value in {"first", "second"} else 0)
+        active_by_profile_map[profile] -= 1
+        return RecoveryStepResult(output=input_source.value)
+
+    step = _concurrent_step_get(tmp_path)
+    monkeypatch.setattr(DBOS, "run_step_async", run_step_async)
+    config = RecoveryConcurrentStepConfig(
+        concurrency=2,
+        correction_attempt_limit=0,
+        instruction="",
+        mcp_playwright_profile="target",
+        mcp_playwright_profile_source=None,
+        model="gpt-5.6-terra",
+        reasoning_effort="high",
+    )
+    value_list = ["first", "second", "third", "fourth", "fifth"]
+
+    result_list = asyncio.run(
+        step.run_list(
+            _concurrent_invocation_list_get(_step_context_get(tmp_path), value_list),
+            config,
+        )
+    )
+
+    assert [result.output for result in result_list] == value_list
+    assert profile_by_value_map == {
+        "first": "target-1",
+        "second": "target-2",
+        "third": "target-1",
+        "fourth": "target-2",
+        "fifth": "target-1",
+    }
+    assert max_active_by_profile_map == {"target-1": 1, "target-2": 1}
+
+
+def test_concurrent_step_rejects_source_colliding_with_derived_lane(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Reject one explicit completed source that is also a derived physical target."""
+
+    call_count = 0
+
+    async def run_step_async(*args: object) -> RecoveryStepResult:
+        """Count any forbidden DBOS dispatch after failed group validation."""
+
+        nonlocal call_count
+        call_count += 1
+        return RecoveryStepResult(output="unexpected")
+
+    monkeypatch.setattr(DBOS, "run_step_async", run_step_async)
+    config = RecoveryConcurrentStepConfig(
+        concurrency=2,
+        correction_attempt_limit=0,
+        instruction="",
+        mcp_playwright_profile="target",
+        mcp_playwright_profile_source="target-1",
+        model="gpt-5.6-terra",
+        reasoning_effort="high",
+    )
+
+    with pytest.raises(ValueError, match="collides with derived physical target"):
+        asyncio.run(
+            _concurrent_step_get(tmp_path).run_outcome_list(
+                _concurrent_invocation_list_get(_step_context_get(tmp_path), ["first", "second"]),
+                config,
+            )
+        )
+
+    assert call_count == 0
 
 
 def test_codex_concurrent_step_waits_for_all_work_before_raising_lowest_index_error(
@@ -899,6 +1024,7 @@ def test_codex_concurrent_step_waits_for_all_work_before_raising_lowest_index_er
         execution_context: WorkflowStepExecutionContext,
         input_source: RecoveryStepInputSource,
         workflow_step_config: RecoveryConcurrentStepConfig,
+        mcp_playwright_profile: str | None,
     ) -> RecoveryStepResult:
         """Complete one item after a value-specific delay or raise its planned failure."""
 
@@ -925,6 +1051,7 @@ def test_codex_concurrent_step_waits_for_all_work_before_raising_lowest_index_er
         artifact_materializer=ArtifactMaterializer(),
         artifact_writer=JsonArtifactWriter(),
         codex_runner=ScriptedCodexRunner([]),
+        mcp_playwright_profile_runtime=McpPlaywrightProfileRuntime(),
         prompt_renderer=PromptRenderer(template_dir=tmp_path / "template"),
         runtime_policy=RECOVERY_RUNTIME_POLICY,
     )
@@ -932,6 +1059,8 @@ def test_codex_concurrent_step_waits_for_all_work_before_raising_lowest_index_er
         concurrency=3,
         correction_attempt_limit=0,
         instruction="",
+        mcp_playwright_profile=None,
+        mcp_playwright_profile_source=None,
         model="gpt-5.6-terra",
         reasoning_effort="high",
     )

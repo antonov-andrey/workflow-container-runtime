@@ -13,7 +13,13 @@ from workflow_container_runtime.workflow.context import WorkflowExecutionContext
 def test_workflow_context_builds_deterministic_child_directories(tmp_path: Path) -> None:
     """Derive child workflow and step directories below the current owner."""
 
-    runtime_capability = WorkflowRuntimeCapability(browser=BrowserRuntimeCapability(mcp_url="http://browser/mcp"))
+    runtime_capability = WorkflowRuntimeCapability(
+        browser=BrowserRuntimeCapability(
+            mcp_playwright_profile_source="data-source-profile",
+            mcp_playwright_profile_writeback_candidate_url="http://platform/control/candidate",
+            mcp_url="http://browser/mcp",
+        )
+    )
     context = WorkflowExecutionContext(
         result_dir=tmp_path,
         runtime_capability=runtime_capability,

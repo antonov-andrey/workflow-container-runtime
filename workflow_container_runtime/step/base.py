@@ -4,7 +4,6 @@ import asyncio
 import json
 
 from abc import ABC, abstractmethod
-from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import ClassVar, Generic, Self, TypeVar, cast, final
 
@@ -13,8 +12,13 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 from workflow_container_runtime.artifact.materializer import ArtifactMaterializer
 from workflow_container_runtime.artifact.writer import JsonArtifactWriter
+from workflow_container_runtime.capability import WorkflowRuntimeCapability
 from workflow_container_runtime.codex.config import CodexRunnerConfig
 from workflow_container_runtime.codex.runner import CodexRunner
+from workflow_container_runtime.mcp_playwright_profile import (
+    McpPlaywrightProfileRuntime,
+    mcp_playwright_profile_name_validate,
+)
 from workflow_container_runtime.model import model_snapshot_get, strict_model_contract_validate
 from workflow_container_runtime.prompt.renderer import PromptRenderer
 from workflow_container_runtime.step.codex import (
@@ -334,6 +338,7 @@ class WorkflowStepCodexBase(
         artifact_materializer: ArtifactMaterializer,
         artifact_writer: JsonArtifactWriter,
         codex_runner: CodexRunner,
+        mcp_playwright_profile_runtime: McpPlaywrightProfileRuntime,
         prompt_renderer: PromptRenderer,
         runtime_policy: WorkflowStepCodexRuntimePolicy,
     ) -> None:
@@ -343,6 +348,7 @@ class WorkflowStepCodexBase(
             artifact_materializer: External artifact tree materializer.
             artifact_writer: Atomic writer for standard files.
             codex_runner: Low-level structured Codex execution boundary.
+            mcp_playwright_profile_runtime: Run-local browser profile routing and lease owner.
             prompt_renderer: Strict project/runtime prompt renderer.
             runtime_policy: Source-owned materialization and transport retry policy.
         """
@@ -350,6 +356,7 @@ class WorkflowStepCodexBase(
         super().__init__(artifact_writer=artifact_writer)
         self._artifact_materializer = artifact_materializer
         self._codex_runner = codex_runner
+        self._mcp_playwright_profile_runtime = mcp_playwright_profile_runtime
         self._prompt_renderer = prompt_renderer
         self._runtime_policy = runtime_policy
 
@@ -371,6 +378,22 @@ class WorkflowStepCodexBase(
             Accepted public step result.
         """
 
+        return self._run_with_profile(
+            execution_context=execution_context,
+            input_source=input_source,
+            mcp_playwright_profile=workflow_step_config.mcp_playwright_profile,
+            workflow_step_config=workflow_step_config,
+        )
+
+    def _run_with_profile(
+        self,
+        execution_context: WorkflowStepExecutionContext,
+        input_source: InputSourceT,
+        workflow_step_config: WorkflowStepCodexConfigT,
+        mcp_playwright_profile: str | None,
+    ) -> ResultT:
+        """Run one validated lifecycle with an exact physical target profile."""
+
         execution_context = WorkflowStepExecutionContext.model_validate(execution_context.model_dump(mode="python"))
         self._step_key_validate()
         self._workflow_step_config_type_validate(workflow_step_config)
@@ -379,11 +402,20 @@ class WorkflowStepCodexBase(
             workflow_step_config=workflow_step_config,
         )
         step_input = self._step_input_get(execution_context, input_source)
-        return self._lifecycle_run(
-            execution_context=execution_context,
-            step_input=step_input,
-            workflow_step_config=workflow_step_config,
-        )
+        with self._mcp_playwright_profile_runtime.lease(
+            mcp_playwright_profile=mcp_playwright_profile,
+            mcp_playwright_profile_source=workflow_step_config.mcp_playwright_profile_source,
+            runtime_capability=execution_context.runtime_capability,
+        ) as route:
+            result = self._lifecycle_run(
+                action_runtime_capability=route.action_runtime_capability,
+                execution_context=execution_context,
+                step_input=step_input,
+                verification_runtime_capability=route.verification_runtime_capability,
+                workflow_step_config=workflow_step_config,
+            )
+            self._mcp_playwright_profile_runtime.writeback_candidate_publish(route)
+            return result
 
     @abstractmethod
     def result_from_action_build(
@@ -426,8 +458,10 @@ class WorkflowStepCodexBase(
     def _lifecycle_run(
         self,
         *,
+        action_runtime_capability: WorkflowRuntimeCapability,
         execution_context: WorkflowStepExecutionContext,
         step_input: InputT,
+        verification_runtime_capability: WorkflowRuntimeCapability,
         workflow_step_config: WorkflowStepCodexConfigT,
     ) -> ResultT:
         """Execute or recover the Codex correction state machine."""
@@ -438,6 +472,7 @@ class WorkflowStepCodexBase(
                 execution_context=execution_context,
                 state=state,
                 step_input=step_input,
+                verification_runtime_capability=verification_runtime_capability,
                 workflow_step_config=workflow_step_config,
             )
             if recovered_result is not None:
@@ -453,6 +488,7 @@ class WorkflowStepCodexBase(
             self.artifact_prepare(execution_context, step_input)
             action_output = self._action_output_get(
                 execution_context=execution_context,
+                runtime_capability=action_runtime_capability,
                 state=state,
                 workflow_step_config=workflow_step_config,
             )
@@ -471,6 +507,7 @@ class WorkflowStepCodexBase(
                 state=state,
                 step_input=step_input,
                 result=result,
+                runtime_capability=verification_runtime_capability,
                 workflow_step_config=workflow_step_config,
             )
             if verification.status == "success":
@@ -484,6 +521,7 @@ class WorkflowStepCodexBase(
         self,
         *,
         execution_context: WorkflowStepExecutionContext,
+        runtime_capability: WorkflowRuntimeCapability,
         state: WorkflowStepCodexState,
         workflow_step_config: WorkflowStepCodexConfigT,
     ) -> ActionOutputT:
@@ -546,7 +584,7 @@ class WorkflowStepCodexBase(
                 output_model=self.action_output_model,
                 prompt=prompt,
                 retry_policy=self._runtime_policy.execution_retry_policy,
-                runtime_capability=execution_context.runtime_capability,
+                runtime_capability=runtime_capability,
                 working_directory=execution_context.result_dir,
             ),
         )
@@ -557,6 +595,7 @@ class WorkflowStepCodexBase(
         execution_context: WorkflowStepExecutionContext,
         state: WorkflowStepCodexState,
         step_input: InputT,
+        verification_runtime_capability: WorkflowRuntimeCapability,
         workflow_step_config: WorkflowStepCodexConfigT,
     ) -> ResultT | None:
         """Recover or classify one previously published candidate.
@@ -591,6 +630,7 @@ class WorkflowStepCodexBase(
                 state=state,
                 step_input=step_input,
                 result=result,
+                runtime_capability=verification_runtime_capability,
                 workflow_step_config=workflow_step_config,
             )
             if verification.status == "success":
@@ -612,6 +652,7 @@ class WorkflowStepCodexBase(
                 state=state,
                 step_input=step_input,
                 result=result,
+                runtime_capability=verification_runtime_capability,
                 workflow_step_config=workflow_step_config,
             )
             if verification.status == "success":
@@ -654,6 +695,7 @@ class WorkflowStepCodexBase(
         state: WorkflowStepCodexState,
         step_input: InputT,
         result: ResultT,
+        runtime_capability: WorkflowRuntimeCapability,
         workflow_step_config: WorkflowStepCodexConfigT,
     ) -> VerificationResult:
         """Run mechanical validation and then mandatory semantic verification.
@@ -719,7 +761,7 @@ class WorkflowStepCodexBase(
                     output_model=VerificationDecision,
                     prompt=prompt,
                     retry_policy=self._runtime_policy.execution_retry_policy,
-                    runtime_capability=execution_context.runtime_capability,
+                    runtime_capability=runtime_capability,
                     working_directory=execution_context.result_dir,
                 ),
             )
@@ -906,33 +948,28 @@ class WorkflowStepCodexConcurrentBase(
         """Run a validated concurrent group while preserving exhausted validation failures in order."""
 
         self._invocation_list_validate(invocation_list, workflow_step_config)
-        semaphore = asyncio.Semaphore(workflow_step_config.concurrency)
-        browser_semaphore_by_mcp_url_map = {
-            invocation.execution_context.runtime_capability.browser.mcp_url: asyncio.Semaphore(1)
-            for invocation in invocation_list
-            if invocation.execution_context.runtime_capability.browser is not None
-        }
+        physical_profile_list = self._physical_profile_list_get(workflow_step_config)
+        result_or_error_list: list[object] = [None] * len(invocation_list)
 
-        async def invocation_result_get(invocation: WorkflowStepInvocation[InputSourceT]) -> ResultT:
-            """Run one DBOS step while holding one scheduler slot."""
+        async def lane_run(lane_index: int) -> None:
+            """Run one round-robin lane sequentially through the DBOS step boundary."""
 
-            async with AsyncExitStack() as stack:
-                browser_capability = invocation.execution_context.runtime_capability.browser
-                if browser_capability is not None:
-                    await stack.enter_async_context(browser_semaphore_by_mcp_url_map[browser_capability.mcp_url])
-                await stack.enter_async_context(semaphore)
-                return await DBOS.run_step_async(
-                    {"name": f"{type(self).__name__}.run"},
-                    self.run,
-                    invocation.execution_context,
-                    invocation.input_source,
-                    workflow_step_config,
-                )
+            for invocation_index in range(lane_index, len(invocation_list), workflow_step_config.concurrency):
+                invocation = invocation_list[invocation_index]
+                try:
+                    result_or_error_list[invocation_index] = await DBOS.run_step_async(
+                        {"name": f"{type(self).__name__}.run"},
+                        self._run_with_profile,
+                        invocation.execution_context,
+                        invocation.input_source,
+                        workflow_step_config,
+                        physical_profile_list[lane_index],
+                    )
+                except BaseException as exc:
+                    result_or_error_list[invocation_index] = exc
 
-        result_or_error_list = await asyncio.gather(
-            *(asyncio.create_task(invocation_result_get(invocation)) for invocation in invocation_list),
-            return_exceptions=True,
-        )
+        lane_count = min(workflow_step_config.concurrency, len(invocation_list))
+        await asyncio.gather(*(asyncio.create_task(lane_run(lane_index)) for lane_index in range(lane_count)))
         outcome_list: list[WorkflowStepInvocationOutcome[ResultT]] = []
         for result_or_error in result_or_error_list:
             if isinstance(result_or_error, StepResultValidationError):
@@ -953,6 +990,25 @@ class WorkflowStepCodexConcurrentBase(
                 )
         return outcome_list
 
+    def _physical_profile_list_get(
+        self,
+        workflow_step_config: WorkflowStepCodexConcurrentConfigT,
+    ) -> list[str | None]:
+        """Derive and validate every configured fixed-lane physical profile."""
+
+        logical_profile = workflow_step_config.mcp_playwright_profile
+        if logical_profile is None:
+            return [None] * workflow_step_config.concurrency
+        if workflow_step_config.concurrency == 1:
+            return [mcp_playwright_profile_name_validate(logical_profile)]
+        physical_profile_list = [
+            mcp_playwright_profile_name_validate(f"{logical_profile}-{lane_number}")
+            for lane_number in range(1, workflow_step_config.concurrency + 1)
+        ]
+        if workflow_step_config.mcp_playwright_profile_source in physical_profile_list:
+            raise ValueError("Playwright profile source collides with derived physical target")
+        return physical_profile_list
+
     def _invocation_list_validate(
         self,
         invocation_list: list[WorkflowStepInvocation[InputSourceT]],
@@ -963,6 +1019,7 @@ class WorkflowStepCodexConcurrentBase(
         if not invocation_list:
             raise ValueError("invocation_list must not be empty")
         self._workflow_step_config_type_validate(workflow_step_config)
+        self._physical_profile_list_get(workflow_step_config)
         first_context = invocation_list[0].execution_context
         step_instance_dir_set: set[Path] = set()
         for invocation in invocation_list:
