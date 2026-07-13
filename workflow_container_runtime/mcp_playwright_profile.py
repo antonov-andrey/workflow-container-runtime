@@ -1,7 +1,8 @@
 """Run-local Playwright profile routing, leasing, and candidate publication."""
 
-from collections.abc import Callable, Generator
+from collections.abc import Generator
 from contextlib import AbstractContextManager, contextmanager
+from math import isfinite
 import re
 from threading import Lock
 from types import TracebackType
@@ -51,6 +52,21 @@ class HttpResponse(Protocol):
         """Leave the response context."""
 
 
+class HttpOpen(Protocol):
+    """Describe the bounded standard-library HTTP call used for publication."""
+
+    def __call__(self, request: Request, *, timeout: float) -> HttpResponse:
+        """Open one request with an explicit transport timeout.
+
+        Args:
+            request: Candidate publication request.
+            timeout: Finite positive timeout in seconds.
+
+        Returns:
+            Candidate publication response context.
+        """
+
+
 class McpPlaywrightProfileRoute(BaseModel):
     """Carry phase-specific capabilities under one physical profile lease."""
 
@@ -64,15 +80,32 @@ class McpPlaywrightProfileRoute(BaseModel):
 class McpPlaywrightProfileRuntime:
     """Own synchronous profile leases and platform candidate publication for one run."""
 
-    def __init__(self, *, urlopen: Callable[[Request], HttpResponse] = urlopen) -> None:
+    def __init__(
+        self,
+        *,
+        mcp_playwright_profile_writeback_candidate_http_timeout_seconds: float = 30.0,
+        urlopen: HttpOpen = urlopen,
+    ) -> None:
         """Initialize an empty profile lock map and HTTP request boundary.
 
         Args:
+            mcp_playwright_profile_writeback_candidate_http_timeout_seconds: Runtime control-call timeout in seconds.
             urlopen: Standard-library-compatible HTTP request callable.
+
+        Raises:
+            ValueError: If the candidate HTTP timeout is not finite and positive.
         """
 
+        if (
+            not isfinite(mcp_playwright_profile_writeback_candidate_http_timeout_seconds)
+            or mcp_playwright_profile_writeback_candidate_http_timeout_seconds <= 0
+        ):
+            raise ValueError("Playwright profile writeback candidate HTTP timeout must be finite positive seconds")
         self._lock_by_profile_map: dict[str, Lock] = {}
         self._lock_map_guard = Lock()
+        self._mcp_playwright_profile_writeback_candidate_http_timeout_seconds = (
+            mcp_playwright_profile_writeback_candidate_http_timeout_seconds
+        )
         self._urlopen = urlopen
 
     def lease(
@@ -159,7 +192,10 @@ class McpPlaywrightProfileRuntime:
             mcp_playwright_profile_source=None,
         )
         request = Request(candidate_url, data=b"", method="POST")
-        with self._urlopen(request) as response:
+        with self._urlopen(
+            request,
+            timeout=self._mcp_playwright_profile_writeback_candidate_http_timeout_seconds,
+        ) as response:
             if response.status != 204:
                 raise RuntimeError(f"Playwright profile candidate endpoint returned {response.status}; expected 204")
 

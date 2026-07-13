@@ -309,14 +309,19 @@ def test_candidate_publication_posts_exact_empty_body_and_requires_204() -> None
     """Publish the selected physical profile through the platform control endpoint."""
 
     request_list: list[object] = []
+    timeout_list: list[float] = []
 
-    def urlopen(request: object) -> FakeHttpResponse:
+    def urlopen(request: object, *, timeout: float) -> FakeHttpResponse:
         """Record one request and return successful candidate publication."""
 
         request_list.append(request)
+        timeout_list.append(timeout)
         return FakeHttpResponse(204)
 
-    runtime = McpPlaywrightProfileRuntime(urlopen=urlopen)
+    runtime = McpPlaywrightProfileRuntime(
+        mcp_playwright_profile_writeback_candidate_http_timeout_seconds=12.5,
+        urlopen=urlopen,
+    )
     with runtime.lease(
         mcp_playwright_profile="target_one",
         mcp_playwright_profile_source=None,
@@ -331,8 +336,12 @@ def test_candidate_publication_posts_exact_empty_body_and_requires_204() -> None
         ("token", "run"),
         ("profile", "target_one"),
     ]
+    assert timeout_list == [12.5]
 
-    failing_runtime = McpPlaywrightProfileRuntime(urlopen=lambda request: FakeHttpResponse(200))
+    failing_runtime = McpPlaywrightProfileRuntime(
+        mcp_playwright_profile_writeback_candidate_http_timeout_seconds=3.0,
+        urlopen=lambda request, *, timeout: FakeHttpResponse(200),
+    )
     with failing_runtime.lease(
         mcp_playwright_profile="target",
         mcp_playwright_profile_source=None,
@@ -340,6 +349,20 @@ def test_candidate_publication_posts_exact_empty_body_and_requires_204() -> None
     ) as route:
         with pytest.raises(RuntimeError, match="204"):
             failing_runtime.writeback_candidate_publish(route)
+
+
+@pytest.mark.parametrize("timeout", [0.0, -1.0, float("inf"), float("-inf"), float("nan")])
+def test_profile_runtime_rejects_non_positive_or_non_finite_candidate_http_timeout(timeout: float) -> None:
+    """Reject candidate control-call timeouts that cannot bound one request.
+
+    Args:
+        timeout: Invalid timeout value.
+    """
+
+    with pytest.raises(ValueError, match="finite positive"):
+        McpPlaywrightProfileRuntime(
+            mcp_playwright_profile_writeback_candidate_http_timeout_seconds=timeout,
+        )
 
 
 def test_profile_runtime_serializes_same_profile_but_not_distinct_profiles() -> None:
@@ -351,10 +374,10 @@ def test_profile_runtime_serializes_same_profile_but_not_distinct_profiles() -> 
     same_entered = Event()
     distinct_entered = Event()
 
-    def urlopen(request: object) -> FakeHttpResponse:
+    def urlopen(request: object, *, timeout: float) -> FakeHttpResponse:
         """Block candidate publication while the profile lease remains active."""
 
-        _ = request
+        _ = request, timeout
         candidate_started.set()
         release_candidate.wait(timeout=2)
         return FakeHttpResponse(204)

@@ -432,9 +432,10 @@ def test_codex_step_routes_phases_and_republishes_recovered_candidate(tmp_path: 
         def __exit__(self, *args: object) -> None:
             """Leave the fake response context."""
 
-    def urlopen(request: object) -> CandidateResponse:
+    def urlopen(request: object, *, timeout: float) -> CandidateResponse:
         """Record one candidate publication."""
 
+        _ = timeout
         request_list.append(request)
         return CandidateResponse()
 
@@ -477,18 +478,15 @@ def test_codex_step_routes_phases_and_republishes_recovered_candidate(tmp_path: 
     assert len(request_list) == 2
 
 
-def test_candidate_publication_failure_propagates_and_recovery_retries_publication(tmp_path: Path) -> None:
-    """Keep candidate failures out of correction feedback and retry publication on recovery."""
+def test_candidate_timeout_propagates_and_recovery_reacquires_profile_lease(tmp_path: Path) -> None:
+    """Release the profile lease after timeout so recovery can republish the accepted result."""
 
-    status_list = [500, 204]
+    candidate_call_count = 0
 
     class CandidateResponse:
-        """Return one scripted platform candidate status."""
+        """Return one successful platform candidate status."""
 
-        def __init__(self, status: int) -> None:
-            """Store the scripted status."""
-
-            self.status = status
+        status = 204
 
         def __enter__(self) -> "CandidateResponse":
             """Enter the fake response context."""
@@ -497,6 +495,28 @@ def test_candidate_publication_failure_propagates_and_recovery_retries_publicati
 
         def __exit__(self, *args: object) -> None:
             """Leave the fake response context."""
+
+    def urlopen(request: object, *, timeout: float) -> CandidateResponse:
+        """Raise one transport timeout before allowing recovery publication.
+
+        Args:
+            request: Candidate publication request.
+            timeout: Bounded candidate HTTP timeout.
+
+        Returns:
+            Successful recovery response.
+
+        Raises:
+            TimeoutError: On the first candidate publication call.
+        """
+
+        nonlocal candidate_call_count
+        _ = request
+        assert timeout == 4.0
+        candidate_call_count += 1
+        if candidate_call_count == 1:
+            raise TimeoutError("candidate endpoint timed out")
+        return CandidateResponse()
 
     config = ExampleStepConfig(
         correction_attempt_limit=1,
@@ -521,19 +541,20 @@ def test_candidate_publication_failure_propagates_and_recovery_retries_publicati
         artifact_writer=JsonArtifactWriter(),
         codex_runner=fake_runner,
         mcp_playwright_profile_runtime=McpPlaywrightProfileRuntime(
-            urlopen=lambda request: CandidateResponse(status_list.pop(0))
+            mcp_playwright_profile_writeback_candidate_http_timeout_seconds=4.0,
+            urlopen=urlopen,
         ),
         prompt_renderer=_prompt_renderer_get(tmp_path / "template"),
         runtime_policy=EXAMPLE_RUNTIME_POLICY,
     )
     context = _context_get(tmp_path, runtime_capability=runtime_capability, workflow_step_config=config)
 
-    with pytest.raises(RuntimeError, match="expected 204"):
+    with pytest.raises(TimeoutError, match="candidate endpoint timed out"):
         step.run(context, ExampleInputSource(value="text"), config)
 
     assert step.run(context, ExampleInputSource(value="text"), config) == ExampleStepResult(output="final")
     assert len(fake_runner.call_list) == 2
-    assert status_list == []
+    assert candidate_call_count == 2
 
 
 @pytest.mark.parametrize("step_kind", ("deterministic", "codex"))
