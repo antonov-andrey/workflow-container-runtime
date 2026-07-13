@@ -4,6 +4,7 @@ import asyncio
 import json
 
 from abc import ABC, abstractmethod
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import ClassVar, Generic, Self, TypeVar, cast, final
 
@@ -906,11 +907,20 @@ class WorkflowStepCodexConcurrentBase(
 
         self._invocation_list_validate(invocation_list, workflow_step_config)
         semaphore = asyncio.Semaphore(workflow_step_config.concurrency)
+        browser_semaphore_by_mcp_url_map = {
+            invocation.execution_context.runtime_capability.browser.mcp_url: asyncio.Semaphore(1)
+            for invocation in invocation_list
+            if invocation.execution_context.runtime_capability.browser is not None
+        }
 
         async def invocation_result_get(invocation: WorkflowStepInvocation[InputSourceT]) -> ResultT:
             """Run one DBOS step while holding one scheduler slot."""
 
-            async with semaphore:
+            async with AsyncExitStack() as stack:
+                browser_capability = invocation.execution_context.runtime_capability.browser
+                if browser_capability is not None:
+                    await stack.enter_async_context(browser_semaphore_by_mcp_url_map[browser_capability.mcp_url])
+                await stack.enter_async_context(semaphore)
                 return await DBOS.run_step_async(
                     {"name": f"{type(self).__name__}.run"},
                     self.run,

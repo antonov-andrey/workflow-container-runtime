@@ -1,7 +1,6 @@
 """Behavior tests for crash recovery and standard-artifact identity guards."""
 
 import asyncio
-
 from collections.abc import Iterator
 from pathlib import Path
 from typing import ClassVar
@@ -16,6 +15,7 @@ from workflow_container_runtime.artifact import (
     ArtifactMaterializer,
     JsonArtifactWriter,
 )
+from workflow_container_runtime.capability import BrowserRuntimeCapability
 from workflow_container_runtime.codex import CodexExecutionError
 from workflow_container_runtime.prompt.renderer import PromptRenderer
 from workflow_container_runtime.step import (
@@ -840,6 +840,50 @@ def test_codex_concurrent_step_returns_input_order_with_bounded_dbos_dispatch(
     assert max_active_count == 2
 
 
+def test_codex_concurrent_step_serializes_one_shared_browser_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Prevent concurrent invocations from controlling one shared browser context."""
+
+    active_count = 0
+    max_active_count = 0
+
+    async def run_step_async(
+        options: dict[str, str],
+        func: object,
+        execution_context: WorkflowStepExecutionContext,
+        input_source: RecoveryStepInputSource,
+        workflow_step_config: RecoveryConcurrentStepConfig,
+    ) -> RecoveryStepResult:
+        """Record simultaneous DBOS dispatch for one browser endpoint."""
+
+        nonlocal active_count, max_active_count
+        _ = options
+        _ = func
+        _ = execution_context
+        _ = workflow_step_config
+        active_count += 1
+        max_active_count = max(max_active_count, active_count)
+        await asyncio.sleep(0.01)
+        active_count -= 1
+        return RecoveryStepResult(output=input_source.value)
+
+    monkeypatch.setattr(DBOS, "run_step_async", run_step_async)
+    context = _step_context_get(tmp_path).model_copy(
+        update={
+            "runtime_capability": WorkflowRuntimeCapability(
+                browser=BrowserRuntimeCapability(mcp_url="http://browser-mcp:8931/mcp")
+            )
+        }
+    )
+    invocation_list = _concurrent_invocation_list_get(context, ["first", "second"])
+
+    asyncio.run(_concurrent_step_get(tmp_path).run_list(invocation_list, _concurrent_config_get()))
+
+    assert max_active_count == 1
+
+
 def test_codex_concurrent_step_waits_for_all_work_before_raising_lowest_index_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -917,12 +961,12 @@ def test_workflow_result_without_verdict_is_revalidated_without_republication(tm
     context = _workflow_context_get(tmp_path, instance_key="missing_verdict")
     workflow_input = RecoveryWorkflowInput(value="text")
     workflow_result = RecoveryWorkflowResult(status="success", error_list=[], warning_list=[], output="TEXT")
-    workflow.input_write_step(context, workflow_input)
-    workflow.result_write_step(context, workflow_input, workflow_result)
+    workflow._input_write(context, workflow_input)
+    workflow._result_write(context, workflow_input, workflow_result)
     verification_path_get(context.workflow_instance_dir).unlink()
     writer.operation_list.clear()
 
-    recovered_result = workflow.result_write_step(
+    recovered_result = workflow._result_write(
         context,
         workflow_input,
         workflow_result.model_copy(deep=True),
@@ -948,10 +992,10 @@ def test_workflow_failed_verdict_is_revalidated_with_current_validator(tmp_path:
     workflow_input = RecoveryWorkflowInput(value="text")
     workflow_result = RecoveryWorkflowResult(status="success", error_list=[], warning_list=[], output="stored")
     rejecting_workflow = RecoveryWorkflow(accepted_output="different", artifact_writer=writer)
-    rejecting_workflow.input_write_step(context, workflow_input)
+    rejecting_workflow._input_write(context, workflow_input)
 
     with pytest.raises(WorkflowResultValidationError):
-        rejecting_workflow.result_write_step(context, workflow_input, workflow_result)
+        rejecting_workflow._result_write(context, workflow_input, workflow_result)
 
     assert VerificationResult.model_validate_json(
         verification_path_get(context.workflow_instance_dir).read_text(encoding="utf-8")
@@ -963,7 +1007,7 @@ def test_workflow_failed_verdict_is_revalidated_with_current_validator(tmp_path:
     writer.operation_list.clear()
     accepting_workflow = RecoveryWorkflow(accepted_output="stored", artifact_writer=writer)
 
-    recovered_result = accepting_workflow.result_write_step(context, workflow_input, workflow_result)
+    recovered_result = accepting_workflow._result_write(context, workflow_input, workflow_result)
 
     assert recovered_result == workflow_result
     assert accepting_workflow.result_validate_count == 1
@@ -1345,10 +1389,10 @@ def test_workflow_rejects_changed_input_identity(tmp_path: Path) -> None:
 
     workflow = RecoveryWorkflow(accepted_output=None, artifact_writer=JsonArtifactWriter())
     context = _workflow_context_get(tmp_path, instance_key="changed_input")
-    workflow.input_write_step(context, RecoveryWorkflowInput(value="first"))
+    workflow._input_write(context, RecoveryWorkflowInput(value="first"))
 
     with pytest.raises(RuntimeError, match="workflow input does not match existing input.json"):
-        workflow.input_write_step(context, RecoveryWorkflowInput(value="second"))
+        workflow._input_write(context, RecoveryWorkflowInput(value="second"))
 
 
 def test_workflow_rejects_changed_result_identity(tmp_path: Path) -> None:
@@ -1358,11 +1402,11 @@ def test_workflow_rejects_changed_result_identity(tmp_path: Path) -> None:
     context = _workflow_context_get(tmp_path, instance_key="changed_result")
     workflow_input = RecoveryWorkflowInput(value="text")
     first_result = RecoveryWorkflowResult(status="success", error_list=[], warning_list=[], output="first")
-    workflow.input_write_step(context, workflow_input)
-    workflow.result_write_step(context, workflow_input, first_result)
+    workflow._input_write(context, workflow_input)
+    workflow._result_write(context, workflow_input, first_result)
 
     with pytest.raises(RuntimeError, match="workflow result does not match existing result.json"):
-        workflow.result_write_step(
+        workflow._result_write(
             context,
             workflow_input,
             RecoveryWorkflowResult(status="success", error_list=[], warning_list=[], output="second"),

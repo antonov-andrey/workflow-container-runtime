@@ -48,7 +48,7 @@ class WorkflowBase(Generic[WorkflowInputT, WorkflowResultT]):
         self._artifact_writer = artifact_writer
 
     @final
-    def input_write_step(
+    async def input_write_step(
         self,
         execution_context: WorkflowExecutionContext,
         workflow_input: WorkflowInputT,
@@ -60,7 +60,7 @@ class WorkflowBase(Generic[WorkflowInputT, WorkflowResultT]):
             workflow_input: Strict public workflow input.
         """
 
-        DBOS.run_step(
+        await DBOS.run_step_async(
             {"name": f"{type(self).__name__}.input_write"},
             self._input_write,
             execution_context,
@@ -68,7 +68,7 @@ class WorkflowBase(Generic[WorkflowInputT, WorkflowResultT]):
         )
 
     @final
-    def result_write_step(
+    async def result_write_step(
         self,
         execution_context: WorkflowExecutionContext,
         workflow_input: WorkflowInputT,
@@ -85,7 +85,7 @@ class WorkflowBase(Generic[WorkflowInputT, WorkflowResultT]):
             The accepted workflow result.
         """
 
-        return DBOS.run_step(
+        return await DBOS.run_step_async(
             {"name": f"{type(self).__name__}.result_write"},
             self._result_write,
             execution_context,

@@ -1,10 +1,8 @@
 """Behavior tests for the common workflow publication lifecycle."""
 
 from pathlib import Path
-from collections.abc import Iterator
 
 import pytest
-from dbos import DBOS, DBOSConfig
 from pydantic import BaseModel, ConfigDict
 from workflow_container_contract import WorkflowResult
 
@@ -47,20 +45,6 @@ class ExampleWorkflow(WorkflowBase[ExampleWorkflowInput, ExampleWorkflowResult])
             raise WorkflowResultValidationError(feedback_list=["Return the uppercase input value."])
 
 
-@pytest.fixture(scope="module", autouse=True)
-def dbos_runtime(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
-    """Provide the official `DBOS.run_step` boundary during lifecycle tests."""
-
-    database_path = tmp_path_factory.mktemp("dbos") / "system.sqlite"
-    config: DBOSConfig = {
-        "name": "runtime_test",
-        "system_database_url": f"sqlite:///{database_path}",
-    }
-    DBOS(config=config)
-    yield
-    DBOS.destroy(destroy_registry=True)
-
-
 def _context_get(tmp_path: Path) -> WorkflowExecutionContext:
     """Return one root workflow context."""
 
@@ -84,8 +68,8 @@ def test_workflow_base_publishes_input_result_and_verification(tmp_path: Path) -
         output="TEXT",
     )
 
-    workflow.input_write_step(context, workflow_input)
-    returned_result = workflow.result_write_step(context, workflow_input, workflow_result)
+    workflow._input_write(context, workflow_input)
+    returned_result = workflow._result_write(context, workflow_input, workflow_result)
 
     assert returned_result == workflow_result
     assert (
@@ -114,10 +98,10 @@ def test_workflow_base_rejects_changed_input_for_same_instance(tmp_path: Path) -
 
     context = _context_get(tmp_path)
     workflow = ExampleWorkflow(artifact_writer=JsonArtifactWriter())
-    workflow.input_write_step(context, ExampleWorkflowInput(value="first"))
+    workflow._input_write(context, ExampleWorkflowInput(value="first"))
 
     with pytest.raises(RuntimeError, match="workflow input does not match existing input.json"):
-        workflow.input_write_step(context, ExampleWorkflowInput(value="second"))
+        workflow._input_write(context, ExampleWorkflowInput(value="second"))
 
 
 @pytest.mark.parametrize(
@@ -138,7 +122,7 @@ def test_workflow_base_rejects_missing_input_for_started_instance(
     workflow = ExampleWorkflow(artifact_writer=JsonArtifactWriter())
 
     with pytest.raises(RuntimeError):
-        workflow.input_write_step(context, ExampleWorkflowInput(value="text"))
+        workflow._input_write(context, ExampleWorkflowInput(value="text"))
 
     assert not input_path_get(context.workflow_instance_dir).exists()
     assert existing_path.read_text(encoding="utf-8") == "existing\n"
@@ -151,10 +135,10 @@ def test_workflow_base_publishes_failed_verification_for_invalid_result(tmp_path
     workflow = ExampleWorkflow(artifact_writer=JsonArtifactWriter())
     workflow_input = ExampleWorkflowInput(value="text")
     workflow_result = ExampleWorkflowResult(status="success", error_list=[], warning_list=[], output="wrong")
-    workflow.input_write_step(context, workflow_input)
+    workflow._input_write(context, workflow_input)
 
     with pytest.raises(WorkflowResultValidationError):
-        workflow.result_write_step(context, workflow_input, workflow_result)
+        workflow._result_write(context, workflow_input, workflow_result)
 
     assert VerificationResult.model_validate_json(
         verification_path_get(context.workflow_instance_dir).read_text(encoding="utf-8")
@@ -172,7 +156,7 @@ def test_workflow_result_publication_requires_pre_orchestration_input(tmp_path: 
     workflow = ExampleWorkflow(artifact_writer=JsonArtifactWriter())
 
     with pytest.raises(RuntimeError, match="workflow input.json must exist before result publication"):
-        workflow.result_write_step(
+        workflow._result_write(
             context,
             ExampleWorkflowInput(value="text"),
             ExampleWorkflowResult(status="success", error_list=[], warning_list=[], output="TEXT"),

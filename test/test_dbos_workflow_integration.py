@@ -122,14 +122,14 @@ def test_configured_dbos_workflow_publishes_typed_standard_bundle(tmp_path: Path
                 return self._step.run(execution_context, input_source)
 
             @DBOS.workflow(validate_args=pydantic_args_validator)
-            def run(
+            async def run(
                 self,
                 execution_context: WorkflowExecutionContext,
                 workflow_input: IntegrationWorkflowInput,
             ) -> IntegrationWorkflowResult:
                 """Publish workflow input, orchestrate one step, and publish the result."""
 
-                self.input_write_step(execution_context, workflow_input)
+                await self.input_write_step(execution_context, workflow_input)
                 step_result = self.uppercase_step(
                     execution_context.for_step(
                         runtime_capability=WorkflowRuntimeCapability(browser=None),
@@ -143,7 +143,7 @@ def test_configured_dbos_workflow_publishes_typed_standard_bundle(tmp_path: Path
                     warning_list=[],
                     output=step_result.output,
                 )
-                return self.result_write_step(
+                return await self.result_write_step(
                     execution_context,
                     workflow_input,
                     workflow_result,

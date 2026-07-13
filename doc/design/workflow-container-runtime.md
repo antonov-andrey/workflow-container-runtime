@@ -3,7 +3,7 @@
 ## Scope
 This project owns generic executable runtime mechanics for workflow-container projects. Concrete workflow containers consume it as a pinned Python dependency.
 
-The runtime owns the generic `WorkflowBase`, `WorkflowStepBase`, deterministic-step and Codex-step lifecycles, standard workflow and step file paths, recovery state machines, `Codex` subprocess execution, structured JSON output schema handling, generic prompt resources, browser-tool event validation, atomic JSON publication, validated SQLite current state, and source-neutral external artifact-tree materialization.
+The runtime owns the generic `WorkflowBase`, `WorkflowStepBase`, deterministic-step and Codex-step lifecycles, standard workflow and step file paths, recovery state machines, `Codex` subprocess execution, structured JSON output schema handling, generic prompt resources, browser-tool event validation, atomic JSON publication, validated SQLite current state, and source-neutral external artifact-tree materialization. The concurrent Codex scheduler serializes invocations that share one browser MCP endpoint while preserving configured concurrency for non-browser invocations and distinct browser endpoints.
 
 The runtime does not own concrete `DBOS` workflow topology, domain input/result/state schemas, domain validators, domain handoff construction, source behavior, extraction logic, browser/VPN process launch, OpenVPN, Playwright MCP server startup, or developer CLI tooling.
 
