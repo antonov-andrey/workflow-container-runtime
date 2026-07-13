@@ -606,6 +606,57 @@ def test_codex_concurrent_step_outcome_list_propagates_infrastructure_error(
     assert completed_value_list == ["failure", "completed"]
 
 
+def test_codex_concurrent_step_cancellation_stops_lane_before_next_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Propagate lane cancellation without dispatching its remaining invocations."""
+
+    dispatched_value_list: list[str] = []
+    first_dispatch_started = asyncio.Event()
+
+    async def run_step_async(
+        options: dict[str, str],
+        func: object,
+        execution_context: WorkflowStepExecutionContext,
+        input_source: RecoveryStepInputSource,
+        workflow_step_config: RecoveryConcurrentStepConfig,
+        mcp_playwright_profile: str | None,
+    ) -> RecoveryStepResult:
+        """Block the first dispatch until the enclosing scheduler is cancelled."""
+
+        _ = options
+        _ = func
+        _ = execution_context
+        _ = workflow_step_config
+        _ = mcp_playwright_profile
+        dispatched_value_list.append(input_source.value)
+        if input_source.value == "first":
+            first_dispatch_started.set()
+            await asyncio.Event().wait()
+        return RecoveryStepResult(output=input_source.value)
+
+    async def cancellation_run() -> None:
+        """Cancel the scheduler after its first lane dispatch starts."""
+
+        scheduler_task = asyncio.create_task(
+            _concurrent_step_get(tmp_path).run_outcome_list(
+                _concurrent_invocation_list_get(_step_context_get(tmp_path), ["first", "second"]),
+                _concurrent_config_get().model_copy(update={"concurrency": 1}),
+            )
+        )
+        await first_dispatch_started.wait()
+        scheduler_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await scheduler_task
+
+    monkeypatch.setattr(DBOS, "run_step_async", run_step_async)
+
+    asyncio.run(cancellation_run())
+
+    assert dispatched_value_list == ["first"]
+
+
 @pytest.mark.parametrize("error_type", [CodexExecutionError, RuntimeError])
 @pytest.mark.parametrize("method_name", ["run_list", "run_outcome_list"])
 def test_codex_concurrent_public_methods_prioritize_infrastructure_error_over_validation_outcome(

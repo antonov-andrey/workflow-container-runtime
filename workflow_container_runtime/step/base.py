@@ -965,6 +965,8 @@ class WorkflowStepCodexConcurrentBase(
                         workflow_step_config,
                         physical_profile_list[lane_index],
                     )
+                except asyncio.CancelledError:
+                    raise
                 except BaseException as exc:
                     result_or_error_list[invocation_index] = exc
 
