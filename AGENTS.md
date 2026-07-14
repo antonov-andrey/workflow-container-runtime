@@ -2,10 +2,10 @@
 
 ## Scope
 - This repository owns reusable runtime code and runtime prompt resources for workflow-container projects.
-- Shared workflow-container ecosystem authoring and code quality rules live in the `workflow-container-developer` plugin reference `references/workflow-container-authoring.md`.
+- Shared workflow-container ecosystem authoring and code quality rules live in the `workflow-container-tools` plugin reference `references/workflow-container-authoring.md`.
 - This repository must not contain domain-specific workflow logic, source-type logic, domain extraction logic, or concrete workflow-container project names.
 - Concrete workflow-container projects depend on this repository at runtime through a pinned Python package dependency.
-- Developer-only authoring tools belong to `workflow-container-developer`, not to this repository.
+- Authoring tools belong to `workflow-container-tools`, not to this repository.
 - This repository owns logical Playwright profile validation, run-local profile leasing, phase-specific MCP URL routing, concurrent lane assignment, and writeback-candidate calls.
 - Browser/VPN stack ownership belongs to `browser-vpn-runtime`; this repository must not own browser process launch, OpenVPN, physical profile directories, profile copying, stealth, locale, viewport, or package-selection behavior.
 
