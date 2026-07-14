@@ -3,7 +3,7 @@
 ## Scope
 This project owns generic executable runtime mechanics for workflow-container projects. Concrete workflow containers consume it as a pinned Python dependency.
 
-The runtime owns the generic `WorkflowBase`, `WorkflowStepBase`, deterministic-step and Codex-step lifecycles, standard workflow and step file paths, recovery state machines, `Codex` subprocess execution, structured JSON output schema handling, generic prompt resources, browser-tool event validation, atomic JSON publication, validated SQLite current state, and source-neutral external artifact-tree materialization. The concurrent Codex scheduler serializes invocations that share one browser MCP endpoint while preserving configured concurrency for non-browser invocations and distinct browser endpoints.
+The runtime owns the generic `WorkflowBase`, `WorkflowStepBase`, deterministic-step and Codex-step lifecycles, standard workflow and step file paths, recovery state machines, `Codex` subprocess execution, structured JSON output schema handling, generic prompt resources, browser-tool event validation, atomic JSON publication, validated SQLite current state, and source-neutral external artifact-tree materialization. It also owns logical Playwright profile validation, phase-specific MCP URL routing, fixed concurrent profile lanes, and an exclusive lease scoped by the run-local MCP router URL without query or fragment plus the physical profile. Query parameters do not create a second lease identity. Invocations with distinct profiles or distinct run-local endpoints remain concurrent.
 
 The runtime does not own concrete `DBOS` workflow topology, domain input/result/state schemas, domain validators, domain handoff construction, source behavior, extraction logic, browser/VPN process launch, OpenVPN, Playwright MCP server startup, or developer CLI tooling.
 
@@ -12,7 +12,7 @@ Shared workflow-container ecosystem authoring and code quality rules live in the
 ## Dependency Boundary
 Concrete workflow-container projects import this package at runtime and inherit its workflow and step base classes. This package imports runtime-neutral source and result contracts from `workflow-container-contract`; it must not import concrete workflow-container projects, `workflow-container-developer`, or domain workflow code.
 
-`workflow-container-developer` owns authoring guidance and audits. `browser-vpn-runtime` owns the browser/VPN stack and exposes a configured Playwright MCP URL to workflow containers. This runtime package may pass that URL to Codex config, but it must not start or configure browser/VPN processes itself.
+`workflow-container-developer` owns authoring guidance and audits. `browser-vpn-runtime` owns browser/VPN processes, physical profile directories, copying, reset, and snapshots and exposes configured run-local Playwright MCP and candidate URLs to workflow containers. This runtime package builds logical profile routes and leases around those URLs, but it must not start or configure browser/VPN processes itself.
 
 ## Prompt Resource Boundary
 Generic prompt partials live in this package under `workflow_container_runtime/prompt/template/`. Concrete workflow-container prompts may include them through the `runtime/` template prefix.

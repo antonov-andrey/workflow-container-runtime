@@ -15,10 +15,7 @@ from workflow_container_runtime.artifact.writer import JsonArtifactWriter
 from workflow_container_runtime.capability import WorkflowRuntimeCapability
 from workflow_container_runtime.codex.config import CodexRunnerConfig
 from workflow_container_runtime.codex.runner import CodexRunner
-from workflow_container_runtime.mcp_playwright_profile import (
-    McpPlaywrightProfileRuntime,
-    mcp_playwright_profile_name_validate,
-)
+from workflow_container_runtime.mcp_playwright_profile import McpPlaywrightProfileRuntime
 from workflow_container_runtime.model import model_snapshot_get, strict_model_contract_validate
 from workflow_container_runtime.prompt.renderer import PromptRenderer
 from workflow_container_runtime.step.codex import (
@@ -929,7 +926,7 @@ class WorkflowStepCodexConcurrentBase(
 
         Raises:
             ValueError: If invocation contexts do not describe one concurrent group.
-            BaseException: The lowest-index non-validation error after all work completes, or the lowest-index
+            Exception: The lowest-index non-validation error after all work completes, or the lowest-index
                 validation error when no non-validation error occurs.
         """
 
@@ -948,7 +945,7 @@ class WorkflowStepCodexConcurrentBase(
         """Run a validated concurrent group while preserving exhausted validation failures in order."""
 
         self._invocation_list_validate(invocation_list, workflow_step_config)
-        physical_profile_list = self._physical_profile_list_get(workflow_step_config)
+        physical_profile_list = workflow_step_config.mcp_playwright_profile_physical_list_get()
         result_or_error_list: list[object] = [None] * len(invocation_list)
 
         async def lane_run(lane_index: int) -> None:
@@ -967,7 +964,7 @@ class WorkflowStepCodexConcurrentBase(
                     )
                 except asyncio.CancelledError:
                     raise
-                except BaseException as exc:
+                except Exception as exc:
                     result_or_error_list[invocation_index] = exc
 
         lane_count = min(workflow_step_config.concurrency, len(invocation_list))
@@ -981,7 +978,7 @@ class WorkflowStepCodexConcurrentBase(
                         validation_feedback_tuple=tuple(result_or_error.feedback_list),
                     )
                 )
-            elif isinstance(result_or_error, BaseException):
+            elif isinstance(result_or_error, Exception):
                 raise result_or_error
             else:
                 outcome_list.append(
@@ -991,25 +988,6 @@ class WorkflowStepCodexConcurrentBase(
                     )
                 )
         return outcome_list
-
-    def _physical_profile_list_get(
-        self,
-        workflow_step_config: WorkflowStepCodexConcurrentConfigT,
-    ) -> list[str | None]:
-        """Derive and validate every configured fixed-lane physical profile."""
-
-        logical_profile = workflow_step_config.mcp_playwright_profile
-        if logical_profile is None:
-            return [None] * workflow_step_config.concurrency
-        if workflow_step_config.concurrency == 1:
-            return [mcp_playwright_profile_name_validate(logical_profile)]
-        physical_profile_list = [
-            mcp_playwright_profile_name_validate(f"{logical_profile}-{lane_number}")
-            for lane_number in range(1, workflow_step_config.concurrency + 1)
-        ]
-        if workflow_step_config.mcp_playwright_profile_source in physical_profile_list:
-            raise ValueError("Playwright profile source collides with derived physical target")
-        return physical_profile_list
 
     def _invocation_list_validate(
         self,
@@ -1021,7 +999,6 @@ class WorkflowStepCodexConcurrentBase(
         if not invocation_list:
             raise ValueError("invocation_list must not be empty")
         self._workflow_step_config_type_validate(workflow_step_config)
-        self._physical_profile_list_get(workflow_step_config)
         first_context = invocation_list[0].execution_context
         step_instance_dir_set: set[Path] = set()
         for invocation in invocation_list:

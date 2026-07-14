@@ -1,7 +1,7 @@
 """Run-local Playwright profile routing, leasing, and candidate publication."""
 
 from collections.abc import Generator
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import contextmanager
 from math import isfinite
 import re
 from threading import Lock
@@ -9,12 +9,13 @@ from types import TracebackType
 from typing import Protocol
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
+from weakref import WeakValueDictionary
 
 from pydantic import BaseModel, ConfigDict
 
 from workflow_container_runtime.capability import BrowserRuntimeCapability, WorkflowRuntimeCapability
 
-MCP_PLAYWRIGHT_PROFILE_NAME_PATTERN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_-]{0,126}[A-Za-z0-9])?")
+_MCP_PLAYWRIGHT_PROFILE_NAME_PATTERN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_-]{0,126}[A-Za-z0-9])?")
 
 
 def mcp_playwright_profile_name_validate(value: str) -> str:
@@ -30,17 +31,17 @@ def mcp_playwright_profile_name_validate(value: str) -> str:
         ValueError: If the browser router would reject the name.
     """
 
-    if MCP_PLAYWRIGHT_PROFILE_NAME_PATTERN.fullmatch(value) is None:
+    if _MCP_PLAYWRIGHT_PROFILE_NAME_PATTERN.fullmatch(value) is None:
         raise ValueError("profile value must be a safe profile name")
     return value
 
 
-class HttpResponse(Protocol):
+class _HttpResponse(Protocol):
     """Describe the standard-library response surface used by candidate publication."""
 
     status: int
 
-    def __enter__(self) -> "HttpResponse":
+    def __enter__(self) -> "_HttpResponse":
         """Enter the response context."""
 
     def __exit__(
@@ -52,10 +53,10 @@ class HttpResponse(Protocol):
         """Leave the response context."""
 
 
-class HttpOpen(Protocol):
+class _HttpOpen(Protocol):
     """Describe the bounded standard-library HTTP call used for publication."""
 
-    def __call__(self, request: Request, *, timeout: float) -> HttpResponse:
+    def __call__(self, request: Request, *, timeout: float) -> _HttpResponse:
         """Open one request with an explicit transport timeout.
 
         Args:
@@ -78,15 +79,15 @@ class McpPlaywrightProfileRoute(BaseModel):
 
 
 class McpPlaywrightProfileRuntime:
-    """Own synchronous profile leases and platform candidate publication for one run."""
+    """Own synchronous run-local profile leases and platform candidate publication."""
 
     def __init__(
         self,
         *,
         mcp_playwright_profile_writeback_candidate_http_timeout_seconds: float = 30.0,
-        urlopen: HttpOpen = urlopen,
+        urlopen: _HttpOpen = urlopen,
     ) -> None:
-        """Initialize an empty profile lock map and HTTP request boundary.
+        """Initialize an empty run-profile lock registry and HTTP request boundary.
 
         Args:
             mcp_playwright_profile_writeback_candidate_http_timeout_seconds: Runtime control-call timeout in seconds.
@@ -101,20 +102,21 @@ class McpPlaywrightProfileRuntime:
             or mcp_playwright_profile_writeback_candidate_http_timeout_seconds <= 0
         ):
             raise ValueError("Playwright profile writeback candidate HTTP timeout must be finite positive seconds")
-        self._lock_by_profile_map: dict[str, Lock] = {}
+        self._lock_by_runtime_profile_map: WeakValueDictionary[tuple[str, str], Lock] = WeakValueDictionary()
         self._lock_map_guard = Lock()
         self._mcp_playwright_profile_writeback_candidate_http_timeout_seconds = (
             mcp_playwright_profile_writeback_candidate_http_timeout_seconds
         )
         self._urlopen = urlopen
 
+    @contextmanager
     def lease(
         self,
         *,
         mcp_playwright_profile: str | None,
         mcp_playwright_profile_source: str | None,
         runtime_capability: WorkflowRuntimeCapability,
-    ) -> AbstractContextManager[McpPlaywrightProfileRoute]:
+    ) -> Generator[McpPlaywrightProfileRoute]:
         """Lease one physical target and expose action and verification routes.
 
         Args:
@@ -122,29 +124,13 @@ class McpPlaywrightProfileRuntime:
             mcp_playwright_profile_source: Exact physical source copied before each action connection.
             runtime_capability: Complete capability supplied for the current workflow run.
 
-        Returns:
-            Context manager yielding phase-specific capabilities protected by the target lease.
+        Yields:
+            Phase-specific capabilities protected by the target lease.
 
         Raises:
             RuntimeError: If a named profile has no browser capability.
             ValueError: If the source and target relationship is invalid.
         """
-
-        return self._lease(
-            mcp_playwright_profile=mcp_playwright_profile,
-            mcp_playwright_profile_source=mcp_playwright_profile_source,
-            runtime_capability=runtime_capability,
-        )
-
-    @contextmanager
-    def _lease(
-        self,
-        *,
-        mcp_playwright_profile: str | None,
-        mcp_playwright_profile_source: str | None,
-        runtime_capability: WorkflowRuntimeCapability,
-    ) -> Generator[McpPlaywrightProfileRoute]:
-        """Implement one physical target lease context."""
 
         if mcp_playwright_profile_source is not None and mcp_playwright_profile is None:
             raise ValueError("Playwright profile source requires a target profile")
@@ -166,8 +152,16 @@ class McpPlaywrightProfileRuntime:
         if mcp_playwright_profile is None:
             yield route
             return
+        split_mcp_url = urlsplit(browser.mcp_url)
+        runtime_profile_key = (
+            urlunsplit((split_mcp_url.scheme, split_mcp_url.netloc, split_mcp_url.path, "", "")),
+            mcp_playwright_profile,
+        )
         with self._lock_map_guard:
-            profile_lock = self._lock_by_profile_map.setdefault(mcp_playwright_profile, Lock())
+            profile_lock = self._lock_by_runtime_profile_map.get(runtime_profile_key)
+            if profile_lock is None:
+                profile_lock = Lock()
+                self._lock_by_runtime_profile_map[runtime_profile_key] = profile_lock
         with profile_lock:
             yield route
 

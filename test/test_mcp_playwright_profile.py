@@ -1,7 +1,7 @@
 """Behavior tests for run-local Playwright profile routing and publication."""
 
+from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import AbstractContextManager
 import inspect
 import json
 from pathlib import Path
@@ -15,7 +15,7 @@ from workflow_container_contract import McpPlaywrightProfileWritebackPolicy, Wor
 
 from workflow_container_runtime.capability import BrowserRuntimeCapability, WorkflowRuntimeCapability
 from workflow_container_runtime.mcp_playwright_profile import McpPlaywrightProfileRoute, McpPlaywrightProfileRuntime
-from workflow_container_runtime.step import WorkflowStepCodexConfigBase
+from workflow_container_runtime.step import WorkflowStepCodexConcurrentConfigBase, WorkflowStepCodexConfigBase
 from workflow_container_runtime.workflow import WorkflowBrowserConfigBase, WorkflowInputBase
 
 
@@ -46,6 +46,10 @@ class ExampleWorkflowBrowserInput(WorkflowInputBase[ExampleWorkflowBrowserReques
 
 class ExampleStepConfig(WorkflowStepCodexConfigBase):
     """Provide one concrete profile-aware step config."""
+
+
+class ExampleConcurrentStepConfig(WorkflowStepCodexConcurrentConfigBase):
+    """Provide one concrete fixed-lane profile-aware step config."""
 
 
 class FakeHttpResponse:
@@ -96,9 +100,7 @@ def test_profile_runtime_exposes_exact_public_method_signatures() -> None:
         "mcp_playwright_profile_source",
         "runtime_capability",
     ]
-    assert (
-        get_type_hints(McpPlaywrightProfileRuntime.lease)["return"] == AbstractContextManager[McpPlaywrightProfileRoute]
-    )
+    assert get_type_hints(McpPlaywrightProfileRuntime.lease)["return"] == Generator[McpPlaywrightProfileRoute]
     assert list(inspect.signature(McpPlaywrightProfileRuntime.writeback_candidate_publish).parameters) == [
         "self",
         "route",
@@ -115,7 +117,7 @@ def test_browser_capability_and_workflow_config_require_complete_profile_contrac
         instruction="",
         mcp_playwright_profile_writeback_policy=McpPlaywrightProfileWritebackPolicy(
             mcp_playwright_profile_name_prefix="source-",
-            workflow_run_status_list=["working", "done"],
+            workflow_run_status_list=("working", "done"),
         ),
     )
 
@@ -156,7 +158,7 @@ def test_step_profile_fields_are_required_nullable_and_validate_relationships(pr
             mcp_playwright_profile=None,
             mcp_playwright_profile_source="source-1",
         )
-    with pytest.raises(ValidationError, match="must differ"):
+    with pytest.raises(ValidationError, match="collides with physical target"):
         ExampleStepConfig(
             **common,
             mcp_playwright_profile="profile-1",
@@ -176,6 +178,38 @@ def test_step_profile_fields_are_required_nullable_and_validate_relationships(pr
     )
     assert config.mcp_playwright_profile is None
     assert config.mcp_playwright_profile_source is None
+
+
+def test_concurrent_step_config_owns_exact_physical_profile_names() -> None:
+    """Validate and expose one deterministic physical profile list for the scheduler."""
+
+    common = {
+        "concurrency": 2,
+        "correction_attempt_limit": 1,
+        "instruction": "",
+        "model": "gpt-5.6-terra",
+        "reasoning_effort": "high",
+    }
+    config = ExampleConcurrentStepConfig(
+        **common,
+        mcp_playwright_profile="target",
+        mcp_playwright_profile_source="target",
+    )
+
+    assert config.mcp_playwright_profile_physical_list_get() == ["target-1", "target-2"]
+
+    with pytest.raises(ValidationError, match="collides with physical target"):
+        ExampleConcurrentStepConfig(
+            **common,
+            mcp_playwright_profile="target",
+            mcp_playwright_profile_source="target-1",
+        )
+    with pytest.raises(ValidationError, match="safe profile name"):
+        ExampleConcurrentStepConfig(
+            **common,
+            mcp_playwright_profile="a" * 128,
+            mcp_playwright_profile_source=None,
+        )
 
 
 def test_profile_runtime_builds_distinct_action_and_verification_capabilities() -> None:
@@ -365,14 +399,15 @@ def test_profile_runtime_rejects_non_positive_or_non_finite_candidate_http_timeo
         )
 
 
-def test_profile_runtime_serializes_same_profile_but_not_distinct_profiles() -> None:
-    """Hold one profile through candidate publication without globally serializing other profiles."""
+def test_profile_runtime_serializes_only_the_same_run_local_profile() -> None:
+    """Serialize one run-local profile without coupling distinct profiles or WorkflowRuns."""
 
     runtime_capability = _runtime_capability_get()
     candidate_started = Event()
     release_candidate = Event()
     same_entered = Event()
     distinct_entered = Event()
+    distinct_run_entered = Event()
 
     def urlopen(request: object, *, timeout: float) -> FakeHttpResponse:
         """Block candidate publication while the profile lease remains active."""
@@ -394,27 +429,44 @@ def test_profile_runtime_serializes_same_profile_but_not_distinct_profiles() -> 
         ) as route:
             runtime.writeback_candidate_publish(route)
 
-    def enter(profile: str, entered: Event) -> None:
+    def enter(
+        profile: str,
+        entered: Event,
+        competing_runtime_capability: WorkflowRuntimeCapability,
+    ) -> None:
         """Record entry into one competing profile lease."""
 
         candidate_started.wait(timeout=2)
         with runtime.lease(
             mcp_playwright_profile=profile,
             mcp_playwright_profile_source=None,
-            runtime_capability=runtime_capability,
+            runtime_capability=competing_runtime_capability,
         ):
             entered.set()
 
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         first_future = executor.submit(hold_first)
-        same_future = executor.submit(enter, "target-1", same_entered)
-        distinct_future = executor.submit(enter, "target-2", distinct_entered)
+        same_future = executor.submit(
+            enter,
+            "target-1",
+            same_entered,
+            _runtime_capability_get(mcp_url="http://browser:8931/mcp?transport=alternate"),
+        )
+        distinct_future = executor.submit(enter, "target-2", distinct_entered, runtime_capability)
+        distinct_run_future = executor.submit(
+            enter,
+            "target-1",
+            distinct_run_entered,
+            _runtime_capability_get(mcp_url="http://other-run-browser:8931/mcp"),
+        )
         assert candidate_started.wait(timeout=1)
         assert distinct_entered.wait(timeout=1)
+        assert distinct_run_entered.wait(timeout=1)
         assert not same_entered.wait(timeout=0.05)
         release_candidate.set()
         first_future.result(timeout=2)
         same_future.result(timeout=2)
         distinct_future.result(timeout=2)
+        distinct_run_future.result(timeout=2)
 
     assert same_entered.is_set()

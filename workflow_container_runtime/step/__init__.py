@@ -1,7 +1,6 @@
 """Public workflow-step lifecycle API."""
 
 from workflow_container_runtime.capability import BrowserRuntimeCapability
-from workflow_container_runtime.mcp_playwright_profile import McpPlaywrightProfileRoute, McpPlaywrightProfileRuntime
 from workflow_container_runtime.retry import CodexExecutionRetryPolicy
 from workflow_container_runtime.step.base import (
     StepResultValidationError,
@@ -23,8 +22,6 @@ from workflow_container_runtime.step.context import WorkflowStepExecutionContext
 __all__ = [
     "BrowserActionResult",
     "BrowserRuntimeCapability",
-    "McpPlaywrightProfileRoute",
-    "McpPlaywrightProfileRuntime",
     "BrowsingError",
     "CodexExecutionRetryPolicy",
     "StepResultValidationError",

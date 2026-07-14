@@ -657,6 +657,44 @@ def test_codex_concurrent_step_cancellation_stops_lane_before_next_dispatch(
     assert dispatched_value_list == ["first"]
 
 
+def test_codex_concurrent_step_does_not_collect_process_abort(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Propagate a process-level abort instead of treating it as one completed lane result."""
+
+    class ProcessAbort(BaseException):
+        """Represent one process-level abort outside the ordinary step error contract."""
+
+    async def run_step_async(
+        options: dict[str, str],
+        func: object,
+        execution_context: WorkflowStepExecutionContext,
+        input_source: RecoveryStepInputSource,
+        workflow_step_config: RecoveryConcurrentStepConfig,
+        mcp_playwright_profile: str | None,
+    ) -> RecoveryStepResult:
+        """Abort the scheduler from its first invocation."""
+
+        _ = options
+        _ = func
+        _ = execution_context
+        _ = input_source
+        _ = workflow_step_config
+        _ = mcp_playwright_profile
+        raise ProcessAbort("process abort")
+
+    monkeypatch.setattr(DBOS, "run_step_async", run_step_async)
+
+    with pytest.raises(ProcessAbort, match="process abort"):
+        asyncio.run(
+            _concurrent_step_get(tmp_path).run_outcome_list(
+                _concurrent_invocation_list_get(_step_context_get(tmp_path), ["first"]),
+                _concurrent_config_get(),
+            )
+        )
+
+
 @pytest.mark.parametrize("error_type", [CodexExecutionError, RuntimeError])
 @pytest.mark.parametrize("method_name", ["run_list", "run_outcome_list"])
 def test_codex_concurrent_public_methods_prioritize_infrastructure_error_over_validation_outcome(
@@ -1021,43 +1059,6 @@ def test_concurrent_step_uses_fixed_profile_lanes_in_original_order(
         "fifth": "target-1",
     }
     assert max_active_by_profile_map == {"target-1": 1, "target-2": 1}
-
-
-def test_concurrent_step_rejects_source_colliding_with_derived_lane(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Reject one explicit completed source that is also a derived physical target."""
-
-    call_count = 0
-
-    async def run_step_async(*args: object) -> RecoveryStepResult:
-        """Count any forbidden DBOS dispatch after failed group validation."""
-
-        nonlocal call_count
-        call_count += 1
-        return RecoveryStepResult(output="unexpected")
-
-    monkeypatch.setattr(DBOS, "run_step_async", run_step_async)
-    config = RecoveryConcurrentStepConfig(
-        concurrency=2,
-        correction_attempt_limit=0,
-        instruction="",
-        mcp_playwright_profile="target",
-        mcp_playwright_profile_source="target-1",
-        model="gpt-5.6-terra",
-        reasoning_effort="high",
-    )
-
-    with pytest.raises(ValueError, match="collides with derived physical target"):
-        asyncio.run(
-            _concurrent_step_get(tmp_path).run_outcome_list(
-                _concurrent_invocation_list_get(_step_context_get(tmp_path), ["first", "second"]),
-                config,
-            )
-        )
-
-    assert call_count == 0
 
 
 def test_codex_concurrent_step_waits_for_all_work_before_raising_lowest_index_error(
