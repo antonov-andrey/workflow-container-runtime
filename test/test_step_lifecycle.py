@@ -6,12 +6,14 @@ from typing import ClassVar
 
 import pytest
 from pydantic import BaseModel, ConfigDict, ValidationError
+from workflow_container_contract import McpPlaywrightProfileWritebackPolicy
 
 from workflow_container_runtime.artifact.materializer import ArtifactMaterializationPolicy, ArtifactMaterializer
 from workflow_container_runtime.artifact.writer import JsonArtifactWriter
 from workflow_container_runtime.capability import BrowserRuntimeCapability
 from workflow_container_runtime.codex.config import CodexRunnerConfig
 from workflow_container_runtime.mcp_playwright_profile import McpPlaywrightProfileRuntime
+from workflow_container_runtime.platform import WorkflowControlRequestError
 from workflow_container_runtime.prompt.renderer import PromptRenderer
 from workflow_container_runtime.step.base import (
     StepResultValidationError,
@@ -29,7 +31,7 @@ from workflow_container_runtime.step.codex import (
 from workflow_container_runtime.step.context import WorkflowStepExecutionContext
 from workflow_container_runtime.step.file import input_path_get, result_path_get, state_path_get, verification_path_get
 from workflow_container_runtime.verification import VerificationDecision, VerificationResult
-from workflow_container_runtime.workflow import WorkflowConfigBase, WorkflowInputBase
+from workflow_container_runtime.workflow import WorkflowBrowserConfigBase, WorkflowInputBase
 from workflow_container_runtime.workflow.context import WorkflowRuntimeCapability
 
 
@@ -62,7 +64,7 @@ class ExampleStepConfigMap(ExampleModel):
     example_build: ExampleStepConfig
 
 
-class ExampleWorkflowConfig(WorkflowConfigBase):
+class ExampleWorkflowConfig(WorkflowBrowserConfigBase):
     """Provide one complete workflow config with the example step selection."""
 
     step_map: ExampleStepConfigMap
@@ -228,6 +230,10 @@ def _context_get(
         ExampleWorkflowInput(
             config=ExampleWorkflowConfig(
                 instruction="",
+                mcp_playwright_profile_writeback_policy=McpPlaywrightProfileWritebackPolicy(
+                    mcp_playwright_profile_name_prefix="",
+                    workflow_run_status_list=("done",),
+                ),
                 step_map=ExampleStepConfigMap(example_build=workflow_step_config),
             ),
             request=ExampleInputSource(value="workflow"),
@@ -337,6 +343,10 @@ def test_codex_step_revalidates_model_copy_context_before_step_side_effects(tmp_
         ExampleWorkflowInput(
             config=ExampleWorkflowConfig(
                 instruction="",
+                mcp_playwright_profile_writeback_policy=McpPlaywrightProfileWritebackPolicy(
+                    mcp_playwright_profile_name_prefix="",
+                    workflow_run_status_list=("done",),
+                ),
                 step_map=ExampleStepConfigMap(example_build=EXAMPLE_STEP_CONFIG),
             ),
             request=ExampleInputSource(value="foreign"),
@@ -478,8 +488,8 @@ def test_codex_step_routes_phases_and_republishes_recovered_candidate(tmp_path: 
     assert len(request_list) == 2
 
 
-def test_candidate_timeout_propagates_and_recovery_reacquires_profile_lease(tmp_path: Path) -> None:
-    """Release the profile lease after timeout so recovery can republish the accepted result."""
+def test_candidate_timeout_wraps_and_recovery_reacquires_profile_lease(tmp_path: Path) -> None:
+    """Wrap one timeout and release its profile lease so recovery can republish the accepted result."""
 
     candidate_call_count = 0
 
@@ -549,7 +559,7 @@ def test_candidate_timeout_propagates_and_recovery_reacquires_profile_lease(tmp_
     )
     context = _context_get(tmp_path, runtime_capability=runtime_capability, workflow_step_config=config)
 
-    with pytest.raises(TimeoutError, match="candidate endpoint timed out"):
+    with pytest.raises(WorkflowControlRequestError, match="transport failed: candidate endpoint timed out"):
         step.run(context, ExampleInputSource(value="text"), config)
 
     assert step.run(context, ExampleInputSource(value="text"), config) == ExampleStepResult(output="final")

@@ -9,6 +9,7 @@ from typing import ClassVar, Generic, Self, TypeVar, cast, final
 
 from dbos import DBOS
 from pydantic import BaseModel, ConfigDict, model_validator
+from workflow_container_contract import McpPlaywrightProfileWritebackPolicy
 
 from workflow_container_runtime.artifact.materializer import ArtifactMaterializer
 from workflow_container_runtime.artifact.writer import JsonArtifactWriter
@@ -41,7 +42,7 @@ WorkflowStepCodexConcurrentConfigT = TypeVar(
 class StepResultValidationError(RuntimeError):
     """Report actionable mechanical feedback for one step result."""
 
-    def __init__(self, *, feedback_list: list[str]) -> None:
+    def __init__(self, feedback_list: list[str]) -> None:
         """Store non-empty validation feedback.
 
         Args:
@@ -53,8 +54,17 @@ class StepResultValidationError(RuntimeError):
 
         if not feedback_list:
             raise ValueError("step result validation feedback must not be empty")
-        super().__init__("; ".join(feedback_list))
+        super().__init__(feedback_list)
         self.feedback_list = feedback_list
+
+    def __str__(self) -> str:
+        """Render validation feedback as one actionable error message.
+
+        Returns:
+            Semicolon-separated validation feedback.
+        """
+
+        return "; ".join(self.feedback_list)
 
 
 class WorkflowStepInvocationOutcome(BaseModel, Generic[ResultT]):
@@ -318,6 +328,30 @@ class WorkflowStepDeterministicBase(
         return result
 
 
+def _mcp_playwright_profile_writeback_policy_get(
+    execution_context: WorkflowStepExecutionContext,
+) -> McpPlaywrightProfileWritebackPolicy:
+    """Load the exact persisted workflow-level profile writeback policy.
+
+    Args:
+        execution_context: Current step execution context.
+
+    Returns:
+        Validated run-owned profile writeback policy.
+
+    Raises:
+        RuntimeError: If the persisted workflow input lacks a valid policy.
+    """
+
+    workflow_input_path = execution_context.result_dir / execution_context.workflow_input_path
+    try:
+        workflow_input_value = json.loads(workflow_input_path.read_text(encoding="utf-8"))
+        policy_value = workflow_input_value["config"]["mcp_playwright_profile_writeback_policy"]
+        return McpPlaywrightProfileWritebackPolicy.model_validate_json(json.dumps(policy_value))
+    except (KeyError, TypeError, ValueError, OSError) as exc:
+        raise RuntimeError("workflow input does not contain a valid Playwright profile writeback policy") from exc
+
+
 class WorkflowStepCodexBase(
     WorkflowStepBase[InputSourceT, InputT, ResultT],
     Generic[InputSourceT, InputT, WorkflowStepCodexConfigT, ActionOutputT, ResultT],
@@ -411,7 +445,14 @@ class WorkflowStepCodexBase(
                 verification_runtime_capability=route.verification_runtime_capability,
                 workflow_step_config=workflow_step_config,
             )
-            self._mcp_playwright_profile_runtime.writeback_candidate_publish(route)
+            if mcp_playwright_profile is not None:
+                step_identity = execution_context.step_instance_dir.relative_to(execution_context.result_dir).as_posix()
+                self._mcp_playwright_profile_runtime.writeback_candidate_stage(
+                    route,
+                    policy=_mcp_playwright_profile_writeback_policy_get(execution_context),
+                    step_identity=step_identity,
+                    transition_identity=f"{step_identity}/completed",
+                )
             return result
 
     @abstractmethod

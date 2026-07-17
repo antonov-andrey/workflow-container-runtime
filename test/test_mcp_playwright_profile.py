@@ -5,8 +5,10 @@ from concurrent.futures import ThreadPoolExecutor
 import inspect
 import json
 from pathlib import Path
+import pickle
 from threading import Event
 from typing import get_type_hints
+from urllib.error import HTTPError
 from urllib.parse import parse_qsl, urlsplit
 
 import pytest
@@ -15,6 +17,7 @@ from workflow_container_contract import McpPlaywrightProfileWritebackPolicy, Wor
 
 from workflow_container_runtime.capability import BrowserRuntimeCapability, WorkflowRuntimeCapability
 from workflow_container_runtime.mcp_playwright_profile import McpPlaywrightProfileRoute, McpPlaywrightProfileRuntime
+from workflow_container_runtime.platform import WorkflowControlClient, WorkflowControlRequestError
 from workflow_container_runtime.step import WorkflowStepCodexConcurrentConfigBase, WorkflowStepCodexConfigBase
 from workflow_container_runtime.workflow import WorkflowBrowserConfigBase, WorkflowInputBase
 
@@ -52,6 +55,16 @@ class ExampleConcurrentStepConfig(WorkflowStepCodexConcurrentConfigBase):
     """Provide one concrete fixed-lane profile-aware step config."""
 
 
+DONE_WRITEBACK_POLICY = McpPlaywrightProfileWritebackPolicy(
+    mcp_playwright_profile_name_prefix="",
+    workflow_run_status_list=("done",),
+)
+DISABLED_WRITEBACK_POLICY = McpPlaywrightProfileWritebackPolicy(
+    mcp_playwright_profile_name_prefix="",
+    workflow_run_status_list=(),
+)
+
+
 class FakeHttpResponse:
     """Expose one configured HTTP status through a context manager."""
 
@@ -67,6 +80,11 @@ class FakeHttpResponse:
 
     def __exit__(self, *args: object) -> None:
         """Leave the response context without suppressing failures."""
+
+    def read(self) -> bytes:
+        """Return one empty successful response body."""
+
+        return b""
 
 
 def _browser_capability_get(
@@ -101,9 +119,12 @@ def test_profile_runtime_exposes_exact_public_method_signatures() -> None:
         "runtime_capability",
     ]
     assert get_type_hints(McpPlaywrightProfileRuntime.lease)["return"] == Generator[McpPlaywrightProfileRoute]
-    assert list(inspect.signature(McpPlaywrightProfileRuntime.writeback_candidate_publish).parameters) == [
+    assert list(inspect.signature(McpPlaywrightProfileRuntime.writeback_candidate_stage).parameters) == [
         "self",
         "route",
+        "policy",
+        "step_identity",
+        "transition_identity",
     ]
 
 
@@ -336,7 +357,41 @@ def test_no_browser_unprofiled_route_and_candidate_are_no_ops() -> None:
     ) as route:
         assert route.action_runtime_capability == runtime_capability
         assert route.verification_runtime_capability == runtime_capability
-        runtime.writeback_candidate_publish(route)
+        runtime.writeback_candidate_stage(
+            route,
+            policy=DISABLED_WRITEBACK_POLICY,
+            step_identity="step-1",
+            transition_identity="step-1/completed",
+        )
+
+
+def test_working_writeback_filtered_profile_is_complete_no_op() -> None:
+    """Do not create a candidate or empty safepoint for one profile excluded by policy."""
+
+    def urlopen(request: object, *, timeout: float) -> FakeHttpResponse:
+        """Fail if one filtered profile reaches either platform endpoint."""
+
+        del request, timeout
+        raise AssertionError("filtered profile must not reach platform control")
+
+    runtime = McpPlaywrightProfileRuntime(
+        urlopen=urlopen,
+        workflow_control_client=WorkflowControlClient(control_url="http://control/v1", urlopen=urlopen),
+    )
+    with runtime.lease(
+        mcp_playwright_profile="other",
+        mcp_playwright_profile_source=None,
+        runtime_capability=_runtime_capability_get(),
+    ) as route:
+        runtime.writeback_candidate_stage(
+            route,
+            policy=McpPlaywrightProfileWritebackPolicy(
+                mcp_playwright_profile_name_prefix="target-",
+                workflow_run_status_list=("working",),
+            ),
+            step_identity="step-1",
+            transition_identity="step-1/completed",
+        )
 
 
 def test_candidate_publication_posts_exact_empty_body_and_requires_204() -> None:
@@ -361,11 +416,19 @@ def test_candidate_publication_posts_exact_empty_body_and_requires_204() -> None
         mcp_playwright_profile_source=None,
         runtime_capability=_runtime_capability_get(),
     ) as route:
-        runtime.writeback_candidate_publish(route)
+        runtime.writeback_candidate_stage(
+            route,
+            policy=DONE_WRITEBACK_POLICY,
+            step_identity="step-1",
+            transition_identity="step-1/completed",
+        )
 
     request = request_list[0]
     assert request.get_method() == "POST"  # type: ignore[attr-defined]
-    assert request.data == b""  # type: ignore[attr-defined]
+    assert json.loads(request.data) == {  # type: ignore[attr-defined]
+        "step_identity": "step-1",
+        "transition_identity": "step-1/completed",
+    }
     assert parse_qsl(urlsplit(request.full_url).query) == [  # type: ignore[attr-defined]
         ("token", "run"),
         ("profile", "target_one"),
@@ -382,7 +445,82 @@ def test_candidate_publication_posts_exact_empty_body_and_requires_204() -> None
         runtime_capability=_runtime_capability_get(),
     ) as route:
         with pytest.raises(RuntimeError, match="204"):
-            failing_runtime.writeback_candidate_publish(route)
+            failing_runtime.writeback_candidate_stage(
+                route,
+                policy=DONE_WRITEBACK_POLICY,
+                step_identity="step-1",
+                transition_identity="step-1/completed",
+            )
+
+
+def test_candidate_publication_wraps_http_error_in_serializable_runtime_error() -> None:
+    """Keep rejected profile publication durable across DBOS error persistence."""
+
+    def urlopen(request: object, *, timeout: float) -> FakeHttpResponse:
+        """Raise the standard-library error produced by one rejected HTTP request."""
+
+        del request, timeout
+        raise HTTPError("http://platform/control/candidate", 409, "Conflict", hdrs=None, fp=None)
+
+    runtime = McpPlaywrightProfileRuntime(urlopen=urlopen)
+    with runtime.lease(
+        mcp_playwright_profile="target",
+        mcp_playwright_profile_source=None,
+        runtime_capability=_runtime_capability_get(),
+    ) as route:
+        with pytest.raises(WorkflowControlRequestError, match="returned HTTP 409") as exception_info:
+            runtime.writeback_candidate_stage(
+                route,
+                policy=DONE_WRITEBACK_POLICY,
+                step_identity="step-1",
+                transition_identity="step-1/completed",
+            )
+
+    restored_error = pickle.loads(pickle.dumps(exception_info.value))
+    assert type(restored_error) is WorkflowControlRequestError
+    assert str(restored_error) == "Playwright profile candidate endpoint returned HTTP 409."
+
+
+def test_working_candidate_accepts_same_identity_safepoint_before_releasing_lease() -> None:
+    """Complete policy-selected candidate staging before its empty owning safepoint."""
+
+    request_list: list[object] = []
+
+    def urlopen(request: object, *, timeout: float) -> FakeHttpResponse:
+        """Record candidate and safepoint control requests in call order."""
+
+        assert timeout == 30.0
+        request_list.append(request)
+        return FakeHttpResponse(204)
+
+    runtime = McpPlaywrightProfileRuntime(
+        urlopen=urlopen,
+        workflow_control_client=WorkflowControlClient(control_url="http://control/v1", urlopen=urlopen),
+    )
+    with runtime.lease(
+        mcp_playwright_profile="target",
+        mcp_playwright_profile_source=None,
+        runtime_capability=_runtime_capability_get(),
+    ) as route:
+        runtime.writeback_candidate_stage(
+            route,
+            policy=McpPlaywrightProfileWritebackPolicy(
+                mcp_playwright_profile_name_prefix="target",
+                workflow_run_status_list=("working",),
+            ),
+            step_identity="step-1",
+            transition_identity="step-1/completed",
+        )
+
+    assert [request.full_url for request in request_list] == [  # type: ignore[attr-defined]
+        "http://platform/control/candidate?token=run&profile=target",
+        "http://control/v1/safepoint",
+    ]
+    assert json.loads(request_list[1].data) == {  # type: ignore[attr-defined]
+        "publication_request_list": [],
+        "step_identity": "step-1",
+        "transition_identity": "step-1/completed",
+    }
 
 
 @pytest.mark.parametrize("timeout", [0.0, -1.0, float("inf"), float("-inf"), float("nan")])
@@ -427,7 +565,12 @@ def test_profile_runtime_serializes_only_the_same_run_local_profile() -> None:
             mcp_playwright_profile_source=None,
             runtime_capability=runtime_capability,
         ) as route:
-            runtime.writeback_candidate_publish(route)
+            runtime.writeback_candidate_stage(
+                route,
+                policy=DONE_WRITEBACK_POLICY,
+                step_identity="step-1",
+                transition_identity="step-1/completed",
+            )
 
     def enter(
         profile: str,

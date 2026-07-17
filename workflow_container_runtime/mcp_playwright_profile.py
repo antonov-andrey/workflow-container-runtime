@@ -7,13 +7,20 @@ import re
 from threading import Lock
 from types import TracebackType
 from typing import Protocol
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 from weakref import WeakValueDictionary
 
 from pydantic import BaseModel, ConfigDict
+from workflow_container_contract import (
+    McpPlaywrightProfileWritebackCandidateRequest,
+    McpPlaywrightProfileWritebackPolicy,
+    WorkflowControlSafepointRequest,
+)
 
 from workflow_container_runtime.capability import BrowserRuntimeCapability, WorkflowRuntimeCapability
+from workflow_container_runtime.platform import WorkflowControlClient, WorkflowControlRequestError
 
 _MCP_PLAYWRIGHT_PROFILE_NAME_PATTERN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_-]{0,126}[A-Za-z0-9])?")
 
@@ -86,12 +93,14 @@ class McpPlaywrightProfileRuntime:
         *,
         mcp_playwright_profile_writeback_candidate_http_timeout_seconds: float = 30.0,
         urlopen: _HttpOpen = urlopen,
+        workflow_control_client: WorkflowControlClient | None = None,
     ) -> None:
         """Initialize an empty run-profile lock registry and HTTP request boundary.
 
         Args:
             mcp_playwright_profile_writeback_candidate_http_timeout_seconds: Runtime control-call timeout in seconds.
             urlopen: Standard-library-compatible HTTP request callable.
+            workflow_control_client: Current execution control adapter required by `working` writeback.
 
         Raises:
             ValueError: If the candidate HTTP timeout is not finite and positive.
@@ -108,6 +117,7 @@ class McpPlaywrightProfileRuntime:
             mcp_playwright_profile_writeback_candidate_http_timeout_seconds
         )
         self._urlopen = urlopen
+        self._workflow_control_client = workflow_control_client
 
     @contextmanager
     def lease(
@@ -165,33 +175,78 @@ class McpPlaywrightProfileRuntime:
         with profile_lock:
             yield route
 
-    def writeback_candidate_publish(self, route: McpPlaywrightProfileRoute) -> None:
-        """Publish one named profile as the run's latest writeback candidate.
+    def writeback_candidate_stage(
+        self,
+        route: McpPlaywrightProfileRoute,
+        *,
+        policy: McpPlaywrightProfileWritebackPolicy,
+        step_identity: str,
+        transition_identity: str,
+    ) -> None:
+        """Stage one policy-selected profile and accept its required working safepoint.
 
         Args:
             route: Current leased profile route after successful semantic verification.
+            policy: Exact run-owned profile writeback policy.
+            step_identity: Stable owning workflow step identity.
+            transition_identity: Stable owning step-completion transition identity.
 
         Raises:
-            RuntimeError: If the platform endpoint does not return HTTP 204.
+            RuntimeError: If a required platform endpoint is unavailable or rejects the request.
         """
 
-        if route.mcp_playwright_profile is None:
+        profile_name = route.mcp_playwright_profile
+        if (
+            not policy.workflow_run_status_list
+            or profile_name is None
+            or not profile_name.startswith(policy.mcp_playwright_profile_name_prefix)
+        ):
             return
         browser = route.action_runtime_capability.browser
         if browser is None:
             raise RuntimeError("configured Playwright profile requires a browser capability")
         candidate_url = self._url_get(
             base_url=browser.mcp_playwright_profile_writeback_candidate_url,
-            mcp_playwright_profile=route.mcp_playwright_profile,
+            mcp_playwright_profile=profile_name,
             mcp_playwright_profile_source=None,
         )
-        request = Request(candidate_url, data=b"", method="POST")
-        with self._urlopen(
-            request,
-            timeout=self._mcp_playwright_profile_writeback_candidate_http_timeout_seconds,
-        ) as response:
-            if response.status != 204:
-                raise RuntimeError(f"Playwright profile candidate endpoint returned {response.status}; expected 204")
+        candidate_request = McpPlaywrightProfileWritebackCandidateRequest(
+            step_identity=step_identity,
+            transition_identity=transition_identity,
+        )
+        request = Request(
+            candidate_url,
+            data=candidate_request.model_dump_json().encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with self._urlopen(
+                request,
+                timeout=self._mcp_playwright_profile_writeback_candidate_http_timeout_seconds,
+            ) as response:
+                if response.status != 204:
+                    raise WorkflowControlRequestError(
+                        f"Playwright profile candidate endpoint returned HTTP {response.status}; expected 204."
+                    )
+        except HTTPError as error:
+            raise WorkflowControlRequestError(
+                f"Playwright profile candidate endpoint returned HTTP {error.code}."
+            ) from error
+        except (TimeoutError, URLError, OSError) as error:
+            raise WorkflowControlRequestError(
+                f"Playwright profile candidate endpoint transport failed: {error}"
+            ) from error
+        if "working" in policy.workflow_run_status_list:
+            if self._workflow_control_client is None:
+                raise RuntimeError("working profile writeback requires a workflow control client")
+            self._workflow_control_client.safepoint_send(
+                request=WorkflowControlSafepointRequest(
+                    publication_request_list=[],
+                    step_identity=step_identity,
+                    transition_identity=transition_identity,
+                )
+            )
 
     def _route_get(
         self,

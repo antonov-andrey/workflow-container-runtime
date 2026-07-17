@@ -31,7 +31,7 @@ def test_setuptools_package_discovery_excludes_tests() -> None:
 def test_package_root_does_not_duplicate_distribution_version() -> None:
     """Keep distribution versioning in installed package metadata only."""
 
-    assert importlib.metadata.version("workflow-container-runtime") == "0.5.0"
+    assert importlib.metadata.version("workflow-container-runtime") == "0.5.3"
     assert not hasattr(workflow_container_runtime, "__version__")
     assert "__version__" not in workflow_container_runtime.__all__
 

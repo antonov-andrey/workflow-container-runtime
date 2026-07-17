@@ -1,6 +1,7 @@
 """Behavior tests for crash recovery and standard-artifact identity guards."""
 
 import asyncio
+import pickle
 from collections.abc import Iterator
 from pathlib import Path
 from typing import ClassVar
@@ -559,6 +560,18 @@ def test_codex_concurrent_step_run_list_raises_rebuilt_validation_error(
         )
 
     assert error.value.feedback_list == ["Correct this result."]
+
+
+def test_step_result_validation_error_survives_pickle_round_trip() -> None:
+    """Preserve feedback when DBOS pickles and restores a validation failure."""
+
+    restored_error = pickle.loads(
+        pickle.dumps(StepResultValidationError(feedback_list=["Correct the first result.", "Keep its evidence."]))
+    )
+
+    assert isinstance(restored_error, StepResultValidationError)
+    assert restored_error.feedback_list == ["Correct the first result.", "Keep its evidence."]
+    assert str(restored_error) == "Correct the first result.; Keep its evidence."
 
 
 @pytest.mark.parametrize("error_type", [CodexExecutionError, RuntimeError])
