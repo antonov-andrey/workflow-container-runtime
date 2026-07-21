@@ -1,13 +1,44 @@
 """Behavior tests for workflow and step execution contexts."""
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
+from workflow_container_contract import WorkflowRunContext
 
 from workflow_container_runtime.capability import BrowserRuntimeCapability
 from workflow_container_runtime.step.context import WorkflowStepExecutionContext
 from workflow_container_runtime.workflow.context import WorkflowExecutionContext, WorkflowRuntimeCapability
+from workflow_container_runtime.data import WorkflowDataPath
+
+
+def _context_value_by_name_map_get(tmp_path: Path) -> dict[str, object]:
+    """Build the shared immutable run and Data context values.
+
+    Args:
+        tmp_path: Isolated runtime root.
+
+    Returns:
+        Context keyword values used by direct constructors.
+    """
+
+    return {
+        "data_path": WorkflowDataPath(
+            result_path=(tmp_path / "data-result").resolve(),
+            workspace_path=(tmp_path / "data-workspace").resolve(),
+        ),
+        "run_context": WorkflowRunContext(
+            interface_major_version=2,
+            version=1,
+            workflow_id="workflow-id",
+            workflow_name="sample",
+            workflow_run_id="20260719123456789",
+            workflow_run_timestamp=datetime(2026, 7, 19, 12, 34, 56, 789000, tzinfo=UTC),
+            workflow_source_id="source-id",
+            workflow_source_version_id="source-version-id",
+        ),
+    }
 
 
 def test_workflow_context_builds_deterministic_child_directories(tmp_path: Path) -> None:
@@ -21,6 +52,7 @@ def test_workflow_context_builds_deterministic_child_directories(tmp_path: Path)
         )
     )
     context = WorkflowExecutionContext(
+        **_context_value_by_name_map_get(tmp_path),
         result_dir=tmp_path,
         runtime_capability=runtime_capability,
         workflow_instance_dir=tmp_path / "workflow" / "run",
@@ -43,6 +75,7 @@ def test_workflow_context_rejects_paths_outside_result_root(tmp_path: Path) -> N
 
     with pytest.raises(ValidationError, match="workflow_instance_dir must be inside result_dir"):
         WorkflowExecutionContext(
+            **_context_value_by_name_map_get(tmp_path),
             result_dir=tmp_path / "inside",
             runtime_capability=WorkflowRuntimeCapability(browser=None),
             workflow_instance_dir=tmp_path / "outside",
@@ -60,6 +93,7 @@ def test_workflow_context_rejects_symlink_escape(tmp_path: Path) -> None:
 
     with pytest.raises(ValidationError, match="workflow_instance_dir must be inside result_dir"):
         WorkflowExecutionContext(
+            **_context_value_by_name_map_get(tmp_path),
             result_dir=result_dir,
             runtime_capability=WorkflowRuntimeCapability(browser=None),
             workflow_instance_dir=result_dir / "workflow" / "run",
@@ -71,6 +105,7 @@ def test_step_context_rejects_unrelated_workflow_input_path(tmp_path: Path) -> N
 
     with pytest.raises(ValidationError, match="current workflow input"):
         WorkflowStepExecutionContext(
+            **_context_value_by_name_map_get(tmp_path),
             result_dir=tmp_path,
             runtime_capability=WorkflowRuntimeCapability(browser=None),
             step_instance_dir=tmp_path / "workflow" / "run" / "step" / "source_discover",
@@ -89,6 +124,7 @@ def test_step_context_rejects_symlinked_workflow_input_escape(tmp_path: Path) ->
 
     with pytest.raises(ValidationError, match="workflow_input_path must resolve inside result_dir"):
         WorkflowStepExecutionContext(
+            **_context_value_by_name_map_get(tmp_path),
             result_dir=tmp_path,
             runtime_capability=WorkflowRuntimeCapability(browser=None),
             step_instance_dir=workflow_instance_dir / "step" / "source_discover",
@@ -101,6 +137,7 @@ def test_workflow_context_rejects_unsafe_instance_keys(tmp_path: Path, instance_
     """Accept one filesystem segment as an instance identity."""
 
     context = WorkflowExecutionContext(
+        **_context_value_by_name_map_get(tmp_path),
         result_dir=tmp_path,
         runtime_capability=WorkflowRuntimeCapability(browser=None),
         workflow_instance_dir=tmp_path / "workflow" / "run",

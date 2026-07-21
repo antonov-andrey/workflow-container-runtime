@@ -451,6 +451,7 @@ class WorkflowStepCodexBase(
                     route,
                     policy=_mcp_playwright_profile_writeback_policy_get(execution_context),
                     step_identity=step_identity,
+                    step_key=self.step_key,
                     transition_identity=f"{step_identity}/completed",
                 )
             return result
@@ -596,18 +597,9 @@ class WorkflowStepCodexBase(
             template_name=f"{self.step_key}.md.j2",
             variable_by_name_map=variable_by_name_map,
         )
-        prompt = "\n\n".join(
-            [
-                self._prompt_renderer.render(
-                    template_name="runtime/partial/stage_action_contract.md.j2",
-                    variable_by_name_map={
-                        "input_path": variable_by_name_map["input_path"],
-                        "step_key": self.step_key,
-                        "workflow_input_path": execution_context.workflow_input_path.as_posix(),
-                    },
-                ),
-                prompt,
-            ]
+        prompt = self._instruction_context_prompt_get(
+            input_path=variable_by_name_map["input_path"],
+            prompt=prompt,
         )
         return cast(
             ActionOutputT,
@@ -726,6 +718,23 @@ class WorkflowStepCodexBase(
 
         return path.relative_to(result_dir).as_posix()
 
+    def _instruction_context_prompt_get(self, *, input_path: str, prompt: str) -> str:
+        """Prepend the shared step instruction routing context to one domain prompt.
+
+        Args:
+            input_path: Result-relative path to the current step input.
+            prompt: Rendered domain action or verification prompt.
+
+        Returns:
+            Complete prompt with one canonical instruction-routing owner.
+        """
+
+        instruction_context = self._prompt_renderer.render(
+            template_name="runtime/partial/step_instruction_context.md.j2",
+            variable_by_name_map={"input_path": input_path, "step_key": self.step_key},
+        )
+        return "\n\n".join([instruction_context, prompt])
+
     def _result_verification_get(
         self,
         *,
@@ -754,35 +763,21 @@ class WorkflowStepCodexBase(
         except StepResultValidationError as exc:
             decision = VerificationDecision(status="failed", feedback_list=exc.feedback_list)
         else:
+            input_path = self._relative_path_get(
+                path=input_path_get(execution_context.step_instance_dir),
+                result_dir=execution_context.result_dir,
+            )
             prompt = self._prompt_renderer.render(
                 template_name=f"{self.step_key}_verify.md.j2",
                 variable_by_name_map={
-                    "input_path": self._relative_path_get(
-                        path=input_path_get(execution_context.step_instance_dir),
-                        result_dir=execution_context.result_dir,
-                    ),
+                    "input_path": input_path,
                     "step_result_path": self._relative_path_get(
                         path=result_path_get(execution_context.step_instance_dir),
                         result_dir=execution_context.result_dir,
                     ),
                 },
             )
-            prompt = "\n\n".join(
-                [
-                    self._prompt_renderer.render(
-                        template_name="runtime/partial/stage_verification_contract.md.j2",
-                        variable_by_name_map={
-                            "input_path": self._relative_path_get(
-                                path=input_path_get(execution_context.step_instance_dir),
-                                result_dir=execution_context.result_dir,
-                            ),
-                            "step_key": self.step_key,
-                            "workflow_input_path": execution_context.workflow_input_path.as_posix(),
-                        },
-                    ),
-                    prompt,
-                ]
-            )
+            prompt = self._instruction_context_prompt_get(input_path=input_path, prompt=prompt)
             decision = cast(
                 VerificationDecision,
                 self._codex_runner.run(

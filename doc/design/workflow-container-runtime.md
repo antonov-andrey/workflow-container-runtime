@@ -14,6 +14,17 @@ Concrete workflow-container projects import this package at runtime and inherit 
 
 `workflow-container-tools` owns authoring guidance and audits. `browser-vpn-runtime` owns browser/VPN processes, physical profile directories, copying, reset, and snapshots and exposes configured run-local Playwright MCP and candidate URLs to workflow containers. This runtime package builds logical profile routes and leases around those URLs, but it must not start or configure browser/VPN processes itself.
 
+## Platform Adapter Boundary
+`WorkflowPlatformRuntimeConfig` is the single environment adapter for `WorkflowSourceInterface` major 2. It loads the exact immutable `WorkflowRunContext` from `WORKFLOW_RUN_CONTEXT_PATH`, verifies its run identity against `WORKFLOW_RUN_ID`, and exposes the provenance model instead of duplicating its fields in package-local config.
+
+`WorkflowDataPath` is the immutable pair of distinct absolute `/result` and `/workspace` roots carried by `WorkflowExecutionContext` and `WorkflowStepExecutionContext`. Concrete workflows derive their source-owned Data layouts from that pair; runtime-owned workflow artifacts remain below the separate `result_dir` rooted in `/runtime`.
+
+`WorkflowControlRequestBuilder` resolves only source-declared `data.run` templates. It creates `WorkflowControlManifestRequest` values after checking the exact placeholder set, binds each safepoint to one declared `step_key` plus its dynamic `step_identity`, and never accepts a physical destination, Data owner, provider identity, or absolute storage path.
+
+`WorkflowControlClient.safepoint_send(...)` is the synchronous accepted-checkpoint and optional Athena-projection barrier. A successful return proves acceptance of the requested manifests, the complete automatic `/runtime` checkpoint, and step completion. `final_send(...)` persists end-of-work intent through the `final` operation; concrete run states remain `done`, `failed`, or `cancelled`.
+
+The package does not upload Data or implement platform storage. Accepted-state restore is represented by the `/runtime` tree materialized before command startup and by idempotent replay of the same control transition identities. `JsonLinesArtifactWriter` provides atomic publication of ordered validated model rows, but dataset schema ownership and row semantics remain with the concrete workflow source.
+
 ## Prompt Resource Boundary
 Generic prompt partials live in this package under `workflow_container_runtime/prompt/template/`. Concrete workflow-container prompts may include them through the `runtime/` template prefix.
 
@@ -22,7 +33,7 @@ The `runtime/` prefix is a protected loader namespace. Project template trees ca
 Concrete workflow-container projects own their full domain prompt templates and domain prompt partials. They must not keep local copies of runtime-owned generic partials.
 
 ## Codex Execution Boundary
-`CodexRunner` requires one immutable `CodexRunnerConfig` with an explicit model and reasoning effort. The runtime passes both values to every `codex exec` call while ignoring user-local Codex configuration, so action and verification behavior cannot depend on a hidden CLI default. The generic runtime does not choose a concrete model; each workflow-container composition root owns that policy once and injects the configured runner into all Codex steps.
+`CodexRunner` requires one immutable per-call `CodexRunnerConfig` with an explicit model and reasoning effort. The exact selected step config in the complete public workflow input owns both values. `WorkflowStepCodexBase` rebuilds the same call config for every action and verifier invocation while ignoring user-local Codex configuration, so behavior cannot depend on a hidden CLI default or constructor-owned run setting. The composition root injects only the reusable runner and source-owned runtime policy; it does not choose or retain run-owned model settings.
 
 ## Verification Boundary
 Semantic verification returns a transient `VerificationDecision` with only `status` and `feedback_list`. The runtime binds that decision to the canonical validated result and one result publication revision, then publishes the required SHA-256 `result_digest` and `result_revision_index` in `VerificationResult`. Codex never supplies either identity field.

@@ -1,11 +1,12 @@
 """Integration coverage for a concrete DBOS-configured workflow instance."""
 
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import ClassVar
 
 from dbos import DBOS, DBOSConfig, DBOSConfiguredInstance, pydantic_args_validator
 from pydantic import BaseModel, ConfigDict
-from workflow_container_contract import WorkflowResult
+from workflow_container_contract import WorkflowResult, WorkflowRunContext
 
 from workflow_container_runtime.artifact import JsonArtifactWriter
 from workflow_container_runtime.step import (
@@ -15,6 +16,7 @@ from workflow_container_runtime.step import (
 from workflow_container_runtime.step.file import input_path_get, result_path_get, verification_path_get
 from workflow_container_runtime.verification import VerificationDecision, VerificationResult
 from workflow_container_runtime.workflow import WorkflowBase, WorkflowExecutionContext, WorkflowRuntimeCapability
+from workflow_container_runtime.data import WorkflowDataPath
 
 
 class IntegrationModel(BaseModel):
@@ -157,7 +159,21 @@ def test_configured_dbos_workflow_publishes_typed_standard_bundle(tmp_path: Path
             result_dir = tmp_path / case_name / "result"
             workflow_instance_dir = result_dir / "workflow" / "integration"
             execution_context = WorkflowExecutionContext(
+                data_path=WorkflowDataPath(
+                    result_path=(tmp_path / case_name / "data-result").resolve(),
+                    workspace_path=(tmp_path / case_name / "data-workspace").resolve(),
+                ),
                 result_dir=result_dir,
+                run_context=WorkflowRunContext(
+                    interface_major_version=2,
+                    version=1,
+                    workflow_id="workflow-id",
+                    workflow_name="integration",
+                    workflow_run_id="20260719123456789",
+                    workflow_run_timestamp=datetime(2026, 7, 19, 12, 34, 56, 789000, tzinfo=UTC),
+                    workflow_source_id="source-id",
+                    workflow_source_version_id="source-version-id",
+                ),
                 runtime_capability=WorkflowRuntimeCapability(browser=None),
                 workflow_instance_dir=workflow_instance_dir,
             )

@@ -7,7 +7,20 @@ import pytest
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import workflow_container_runtime.artifact as artifact
-from workflow_container_runtime.artifact.writer import JsonArtifactWriter, shared_artifact_directory_prepare
+from workflow_container_runtime.artifact.writer import (
+    JsonArtifactWriter,
+    JsonLinesArtifactWriter,
+    shared_artifact_directory_prepare,
+)
+
+
+class DatasetRow(BaseModel):
+    """Ordered dataset row used by JSON Lines writer tests."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    alpha: str
+    beta: int
 
 
 class ExampleModel(BaseModel):
@@ -83,3 +96,16 @@ def test_json_writer_revalidates_in_place_mutated_model_before_publication(tmp_p
         JsonArtifactWriter().write(path, value)
 
     assert not path.exists()
+
+
+def test_json_lines_writer_preserves_row_and_field_order(tmp_path: Path) -> None:
+    """Publish compact UTF-8 rows in caller order with one trailing newline each."""
+
+    path = tmp_path / "dataset" / "part-00000.jsonl"
+    JsonLinesArtifactWriter().write(
+        path,
+        [DatasetRow(alpha="первый", beta=1), DatasetRow(alpha="second", beta=2)],
+    )
+
+    assert path.read_text(encoding="utf-8") == ('{"alpha":"первый","beta":1}\n' '{"alpha":"second","beta":2}\n')
+    assert not list(path.parent.glob(f".{path.name}.*"))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from io import BytesIO
 import json
 from pathlib import Path
@@ -11,10 +12,11 @@ from urllib.request import Request
 
 import pytest
 from workflow_container_contract import (
-    WorkflowControlPublicationRequest,
+    WorkflowControlFinalRequest,
+    WorkflowControlManifestRequest,
     WorkflowControlSafepointRequest,
-    WorkflowControlTerminalRequest,
     WorkflowResult,
+    WorkflowRunContext,
 )
 
 from workflow_container_runtime.capability import WorkflowRuntimeCapability
@@ -67,24 +69,42 @@ class HttpResponseStub:
         return self._payload
 
 
-def test_platform_runtime_config_loads_only_standard_environment() -> None:
-    """Normalize the five platform values without package-specific assumptions."""
+def test_platform_runtime_config_loads_only_standard_environment(tmp_path: Path) -> None:
+    """Normalize the six platform values and exact immutable run provenance.
+
+    Args:
+        tmp_path: Isolated immutable input directory.
+    """
+
+    run_context_path = tmp_path / "run-context.json"
+    run_context = WorkflowRunContext(
+        interface_major_version=2,
+        version=1,
+        workflow_id="workflow-id",
+        workflow_name="sample_workflow",
+        workflow_run_id="20260719123456789",
+        workflow_run_timestamp=datetime(2026, 7, 19, 12, 34, 56, 789000, tzinfo=UTC),
+        workflow_source_id="source-id",
+        workflow_source_version_id="source-version-id",
+    )
+    run_context_path.write_text(run_context.model_dump_json(), encoding="utf-8")
 
     config = WorkflowPlatformRuntimeConfig.from_environment(
         {
             "WORKFLOW_CAPABILITY_CONFIG_PATH": "/input/capability.json",
-            "WORKFLOW_CONTROL_URL": "http://control:8080/v1/",
+            "WORKFLOW_CONTROL_URL": "http://control:8080/v2/",
             "WORKFLOW_INPUT_PATH": "/input/input.json",
-            "WORKFLOW_RUN_ID": "run-1",
+            "WORKFLOW_RUN_CONTEXT_PATH": str(run_context_path),
+            "WORKFLOW_RUN_ID": "20260719123456789",
             "WORKFLOW_RUNTIME_PATH": "/runtime",
         }
     )
 
     assert config.model_dump(mode="python") == {
         "capability_config_path": Path("/input/capability.json"),
-        "control_url": "http://control:8080/v1",
+        "control_url": "http://control:8080/v2",
         "input_path": Path("/input/input.json"),
-        "run_id": "run-1",
+        "run_context": run_context.model_dump(mode="python"),
         "runtime_path": Path("/runtime"),
     }
 
@@ -97,9 +117,18 @@ def test_platform_runtime_config_rejects_missing_or_relative_values() -> None:
     with pytest.raises(ValueError, match="absolute"):
         WorkflowPlatformRuntimeConfig(
             capability_config_path=Path("capability.json"),
-            control_url="http://control/v1",
+            control_url="http://control/v2",
             input_path=Path("/input/input.json"),
-            run_id="run-1",
+            run_context=WorkflowRunContext(
+                interface_major_version=2,
+                version=1,
+                workflow_id="workflow-id",
+                workflow_name="sample_workflow",
+                workflow_run_id="20260719123456789",
+                workflow_run_timestamp=datetime(2026, 7, 19, 12, 34, 56, 789000, tzinfo=UTC),
+                workflow_source_id="source-id",
+                workflow_source_version_id="source-version-id",
+            ),
             runtime_path=Path("/runtime"),
         )
 
@@ -139,7 +168,7 @@ def test_runtime_capability_allows_an_empty_platform_capability_set(tmp_path: Pa
 
 
 def test_control_client_sends_exact_typed_protocol_requests() -> None:
-    """Send registration, safepoint, terminal, and cancellation through the current proxy."""
+    """Send registration, safepoint, final, and cancellation through the current proxy."""
 
     captured_request_list: list[Request] = []
     response_list = [
@@ -165,25 +194,29 @@ def test_control_client_sends_exact_typed_protocol_requests() -> None:
         return response_list.pop(0)
 
     client = WorkflowControlClient(
-        control_url="http://control/v1/",
+        control_url="http://control/v2/",
         http_timeout_seconds=12.0,
         urlopen=urlopen_stub,
     )
-    publication_request_list = [
-        WorkflowControlPublicationRequest(data_mount_key="result", source_relative_path="workflow/run")
+    manifest_request_list = [
+        WorkflowControlManifestRequest(
+            manifest_key="result",
+            path_parameter_by_name_map={"item_key": "item-1"},
+        )
     ]
 
     client.registration_send(workflow_run_id="run-1")
     client.safepoint_send(
         request=WorkflowControlSafepointRequest(
-            publication_request_list=publication_request_list,
+            manifest_request_list=manifest_request_list,
             step_identity="brand/one",
+            step_key="brand_complete",
             transition_identity="brand/one/completed",
         )
     )
-    client.terminal_send(
-        request=WorkflowControlTerminalRequest(
-            publication_request_list=publication_request_list,
+    client.final_send(
+        request=WorkflowControlFinalRequest(
+            manifest_request_list=manifest_request_list,
             transition_identity="run/completed",
             workflow_result=WorkflowResult(error_list=[], status="success", warning_list=[]),
         )
@@ -191,10 +224,10 @@ def test_control_client_sends_exact_typed_protocol_requests() -> None:
 
     assert client.cancellation_get() is True
     assert [request.full_url for request in captured_request_list] == [
-        "http://control/v1/registration",
-        "http://control/v1/safepoint",
-        "http://control/v1/terminal",
-        "http://control/v1/cancellation",
+        "http://control/v2/registration",
+        "http://control/v2/safepoint",
+        "http://control/v2/final",
+        "http://control/v2/cancellation",
     ]
     assert json.loads(captured_request_list[0].data) == {"workflow_run_id": "run-1"}
     assert json.loads(captured_request_list[1].data)["step_identity"] == "brand/one"
@@ -223,7 +256,7 @@ def test_control_client_preserves_structured_rejection_detail() -> None:
             status=409,
         )
 
-    client = WorkflowControlClient(control_url="http://control/v1", urlopen=urlopen_stub)
+    client = WorkflowControlClient(control_url="http://control/v2", urlopen=urlopen_stub)
 
     with pytest.raises(WorkflowControlRequestError, match="transition payload changed"):
         client.registration_send(workflow_run_id="run-1")
@@ -235,7 +268,7 @@ def test_control_client_retries_transient_platform_failures(monkeypatch: pytest.
     response_or_error_list = [
         URLError("control unavailable"),
         HTTPError(
-            url="http://control/v1/registration",
+            url="http://control/v2/registration",
             code=503,
             msg="Service Unavailable",
             hdrs=None,
@@ -269,7 +302,7 @@ def test_control_client_retries_transient_platform_failures(monkeypatch: pytest.
         return response_or_error
 
     monkeypatch.setattr(platform_module, "sleep", sleep_seconds_list.append)
-    client = WorkflowControlClient(control_url="http://control/v1", urlopen=urlopen_stub)
+    client = WorkflowControlClient(control_url="http://control/v2", urlopen=urlopen_stub)
 
     client.registration_send(workflow_run_id="run-1")
 

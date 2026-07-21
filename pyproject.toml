@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "workflow-container-runtime"
-version = "0.5.3"
+version = "0.6.3"
 description = "Reusable runtime mechanics for workflow-container projects"
 requires-python = ">=3.14"
 dependencies = [
   "dbos>=2.0.0",
   "Jinja2>=3.1.0",
   "pydantic>=2.0",
-  "workflow-container-contract>=0.4.0,<0.5",
+  "workflow-container-contract>=0.5.0,<0.6",
 ]
 
 [project.optional-dependencies]

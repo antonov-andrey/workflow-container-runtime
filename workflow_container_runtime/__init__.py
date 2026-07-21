@@ -6,6 +6,7 @@ from workflow_container_runtime.platform import (
     WorkflowControlRequestError,
     WorkflowPlatformRuntimeConfig,
 )
+from workflow_container_runtime.request import WorkflowControlRequestBuilder
 from workflow_container_runtime.state import (
     STATE_DATABASE_FILENAME,
     SqliteStateCommand,
@@ -23,6 +24,7 @@ __all__ = [
     "SqliteStateTable",
     "WorkflowControlClient",
     "WorkflowControlRequestError",
+    "WorkflowControlRequestBuilder",
     "WorkflowPlatformRuntimeConfig",
     "state_database_path_get",
 ]

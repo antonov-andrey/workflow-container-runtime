@@ -13,11 +13,12 @@ from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from workflow_container_contract import McpPlaywrightProfileWritebackPolicy, WorkflowInputSchema
+from workflow_container_contract import McpPlaywrightProfileWritebackPolicy, WorkflowDefinition, WorkflowInputSchema
 
 from workflow_container_runtime.capability import BrowserRuntimeCapability, WorkflowRuntimeCapability
 from workflow_container_runtime.mcp_playwright_profile import McpPlaywrightProfileRoute, McpPlaywrightProfileRuntime
 from workflow_container_runtime.platform import WorkflowControlClient, WorkflowControlRequestError
+from workflow_container_runtime.request import WorkflowControlRequestBuilder
 from workflow_container_runtime.step import WorkflowStepCodexConcurrentConfigBase, WorkflowStepCodexConfigBase
 from workflow_container_runtime.workflow import WorkflowBrowserConfigBase, WorkflowInputBase
 
@@ -109,6 +110,26 @@ def _runtime_capability_get(
     return WorkflowRuntimeCapability(browser=_browser_capability_get(mcp_url=mcp_url))
 
 
+def _workflow_control_request_builder_get() -> WorkflowControlRequestBuilder:
+    """Build one exact source declaration for profile safepoint tests.
+
+    Returns:
+        Control request builder declaring the exercised source step.
+    """
+
+    return WorkflowControlRequestBuilder(
+        workflow_definition=WorkflowDefinition.model_validate(
+            {
+                "build": {"dockerfile_path": "Dockerfile"},
+                "command": ["run"],
+                "input_schema_path": "input.schema.json",
+                "name": "example",
+                "step": {"source_discover": {}},
+            }
+        )
+    )
+
+
 def test_profile_runtime_exposes_exact_public_method_signatures() -> None:
     """Keep the profile runtime interface aligned with the canonical Appendix A contract."""
 
@@ -124,6 +145,7 @@ def test_profile_runtime_exposes_exact_public_method_signatures() -> None:
         "route",
         "policy",
         "step_identity",
+        "step_key",
         "transition_identity",
     ]
 
@@ -361,6 +383,7 @@ def test_no_browser_unprofiled_route_and_candidate_are_no_ops() -> None:
             route,
             policy=DISABLED_WRITEBACK_POLICY,
             step_identity="step-1",
+            step_key="source_discover",
             transition_identity="step-1/completed",
         )
 
@@ -376,7 +399,7 @@ def test_working_writeback_filtered_profile_is_complete_no_op() -> None:
 
     runtime = McpPlaywrightProfileRuntime(
         urlopen=urlopen,
-        workflow_control_client=WorkflowControlClient(control_url="http://control/v1", urlopen=urlopen),
+        workflow_control_client=WorkflowControlClient(control_url="http://control/v2", urlopen=urlopen),
     )
     with runtime.lease(
         mcp_playwright_profile="other",
@@ -390,6 +413,7 @@ def test_working_writeback_filtered_profile_is_complete_no_op() -> None:
                 workflow_run_status_list=("working",),
             ),
             step_identity="step-1",
+            step_key="source_discover",
             transition_identity="step-1/completed",
         )
 
@@ -420,6 +444,7 @@ def test_candidate_publication_posts_exact_empty_body_and_requires_204() -> None
             route,
             policy=DONE_WRITEBACK_POLICY,
             step_identity="step-1",
+            step_key="source_discover",
             transition_identity="step-1/completed",
         )
 
@@ -449,6 +474,7 @@ def test_candidate_publication_posts_exact_empty_body_and_requires_204() -> None
                 route,
                 policy=DONE_WRITEBACK_POLICY,
                 step_identity="step-1",
+                step_key="source_discover",
                 transition_identity="step-1/completed",
             )
 
@@ -473,6 +499,7 @@ def test_candidate_publication_wraps_http_error_in_serializable_runtime_error() 
                 route,
                 policy=DONE_WRITEBACK_POLICY,
                 step_identity="step-1",
+                step_key="source_discover",
                 transition_identity="step-1/completed",
             )
 
@@ -495,7 +522,8 @@ def test_working_candidate_accepts_same_identity_safepoint_before_releasing_leas
 
     runtime = McpPlaywrightProfileRuntime(
         urlopen=urlopen,
-        workflow_control_client=WorkflowControlClient(control_url="http://control/v1", urlopen=urlopen),
+        workflow_control_client=WorkflowControlClient(control_url="http://control/v2", urlopen=urlopen),
+        workflow_control_request_builder=_workflow_control_request_builder_get(),
     )
     with runtime.lease(
         mcp_playwright_profile="target",
@@ -509,16 +537,18 @@ def test_working_candidate_accepts_same_identity_safepoint_before_releasing_leas
                 workflow_run_status_list=("working",),
             ),
             step_identity="step-1",
+            step_key="source_discover",
             transition_identity="step-1/completed",
         )
 
     assert [request.full_url for request in request_list] == [  # type: ignore[attr-defined]
         "http://platform/control/candidate?token=run&profile=target",
-        "http://control/v1/safepoint",
+        "http://control/v2/safepoint",
     ]
     assert json.loads(request_list[1].data) == {  # type: ignore[attr-defined]
-        "publication_request_list": [],
+        "manifest_request_list": [],
         "step_identity": "step-1",
+        "step_key": "source_discover",
         "transition_identity": "step-1/completed",
     }
 
@@ -569,6 +599,7 @@ def test_profile_runtime_serializes_only_the_same_run_local_profile() -> None:
                 route,
                 policy=DONE_WRITEBACK_POLICY,
                 step_identity="step-1",
+                step_key="source_discover",
                 transition_identity="step-1/completed",
             )
 

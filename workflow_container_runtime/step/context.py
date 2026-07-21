@@ -4,10 +4,12 @@ from pathlib import Path
 from typing import Generic, Self, TypeVar
 
 from pydantic import BaseModel, ConfigDict, model_validator
+from workflow_container_contract import WorkflowRunContext
 
 from workflow_container_runtime.capability import WorkflowRuntimeCapability
 from workflow_container_runtime.instance import instance_path_validate
 from workflow_container_runtime.step.file import input_path_get
+from workflow_container_runtime.data import WorkflowDataPath
 
 InputSourceT = TypeVar("InputSourceT", bound=BaseModel)
 
@@ -17,7 +19,9 @@ class WorkflowStepExecutionContext(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True, validate_default=True)
 
+    data_path: WorkflowDataPath
     result_dir: Path
+    run_context: WorkflowRunContext
     runtime_capability: WorkflowRuntimeCapability
     step_instance_dir: Path
     workflow_input_path: Path

@@ -1,14 +1,14 @@
 """Execution context and runtime capability for workflow owners."""
 
 from pathlib import Path
-from typing import Self
-
 from pydantic import BaseModel, ConfigDict, model_validator
+from workflow_container_contract import WorkflowRunContext
 
 from workflow_container_runtime.capability import WorkflowRuntimeCapability
 from workflow_container_runtime.instance import instance_key_validate, instance_path_validate
 from workflow_container_runtime.step.context import WorkflowStepExecutionContext
 from workflow_container_runtime.step.file import input_path_get
+from workflow_container_runtime.data import WorkflowDataPath
 
 
 class WorkflowExecutionContext(BaseModel):
@@ -16,7 +16,9 @@ class WorkflowExecutionContext(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True, validate_default=True)
 
+    data_path: WorkflowDataPath
     result_dir: Path
+    run_context: WorkflowRunContext
     runtime_capability: WorkflowRuntimeCapability
     workflow_instance_dir: Path
 
@@ -53,7 +55,9 @@ class WorkflowExecutionContext(BaseModel):
 
         instance_key_validate(workflow_instance_key)
         return WorkflowExecutionContext(
+            data_path=self.data_path,
             result_dir=self.result_dir,
+            run_context=self.run_context,
             runtime_capability=runtime_capability,
             workflow_instance_dir=self.workflow_instance_dir / "workflow" / workflow_instance_key,
         )
@@ -76,7 +80,9 @@ class WorkflowExecutionContext(BaseModel):
 
         instance_key_validate(step_instance_key)
         return WorkflowStepExecutionContext(
+            data_path=self.data_path,
             result_dir=self.result_dir,
+            run_context=self.run_context,
             runtime_capability=runtime_capability,
             step_instance_dir=self.workflow_instance_dir / "step" / step_instance_key,
             workflow_input_path=input_path_get(self.workflow_instance_dir).relative_to(self.result_dir),

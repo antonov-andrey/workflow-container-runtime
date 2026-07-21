@@ -10,6 +10,50 @@ from pydantic import BaseModel
 from workflow_container_runtime.model import model_snapshot_get
 
 
+def _directory_sync(path: Path) -> None:
+    """Synchronize one directory entry set.
+
+    Args:
+        path: Directory path to synchronize.
+    """
+
+    directory_descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
+
+
+def _text_write(*, path: Path, payload: str) -> None:
+    """Atomically publish one complete UTF-8 text payload.
+
+    Args:
+        path: Artifact path to publish.
+        payload: Complete text content.
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=path.parent,
+            encoding="utf-8",
+            mode="w",
+            prefix=f".{path.name}.",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            temporary_file.write(payload)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, path)
+        temporary_path = None
+        _directory_sync(path.parent)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
+
+
 def shared_artifact_directory_prepare(path: Path) -> None:
     """Prepare one declared directory for cooperating container processes.
 
@@ -47,19 +91,6 @@ class JsonArtifactWriter:
         snapshot = model_snapshot_get(value)
         self._json_write(path=path, value=snapshot.model_dump(mode="json"))
 
-    def _directory_sync(self, path: Path) -> None:
-        """Synchronize one directory entry set.
-
-        Args:
-            path: Directory path to synchronize.
-        """
-
-        directory_descriptor = os.open(path, os.O_RDONLY)
-        try:
-            os.fsync(directory_descriptor)
-        finally:
-            os.close(directory_descriptor)
-
     def _json_write(self, *, path: Path, value: object) -> None:
         """Atomically publish one JSON-compatible value.
 
@@ -68,27 +99,8 @@ class JsonArtifactWriter:
             value: JSON-compatible value.
         """
 
-        path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(value, indent=2, sort_keys=True) + "\n"
-        temporary_path: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                dir=path.parent,
-                encoding="utf-8",
-                mode="w",
-                prefix=f".{path.name}.",
-                delete=False,
-            ) as temporary_file:
-                temporary_path = Path(temporary_file.name)
-                temporary_file.write(payload)
-                temporary_file.flush()
-                os.fsync(temporary_file.fileno())
-            os.replace(temporary_path, path)
-            temporary_path = None
-            self._directory_sync(path.parent)
-        finally:
-            if temporary_path is not None and temporary_path.exists():
-                temporary_path.unlink()
+        _text_write(path=path, payload=payload)
 
     def _schema_strict_normalize(self, schema: object) -> None:
         """Require every declared object property in a structured-output schema.
@@ -108,3 +120,26 @@ class JsonArtifactWriter:
         if isinstance(schema, list):
             for value in schema:
                 self._schema_strict_normalize(value)
+
+
+class JsonLinesArtifactWriter:
+    """Publish deterministic validated model rows as one atomic JSON Lines file."""
+
+    def write(self, path: Path, value_list: list[BaseModel]) -> None:
+        """Publish one JSON object per line in validated model field order.
+
+        Args:
+            path: Dataset artifact path.
+            value_list: Ordered validated row list.
+        """
+
+        payload = "".join(
+            json.dumps(
+                model_snapshot_get(value).model_dump(mode="json"),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n"
+            for value in value_list
+        )
+        _text_write(path=path, payload=payload)

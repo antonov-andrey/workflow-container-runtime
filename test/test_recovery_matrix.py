@@ -3,13 +3,14 @@
 import asyncio
 import pickle
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import ClassVar
 
 import pytest
 from dbos import DBOS, DBOSConfig
 from pydantic import BaseModel, ConfigDict, ValidationError
-from workflow_container_contract import WorkflowResult
+from workflow_container_contract import WorkflowResult, WorkflowRunContext
 
 from workflow_container_runtime.artifact import (
     ArtifactMaterializationPolicy,
@@ -44,6 +45,7 @@ from workflow_container_runtime.workflow import (
     WorkflowResultValidationError,
     WorkflowRuntimeCapability,
 )
+from workflow_container_runtime.data import WorkflowDataPath
 
 
 class RecoveryModel(BaseModel):
@@ -360,7 +362,21 @@ def _step_context_get(tmp_path: Path) -> WorkflowStepExecutionContext:
         ),
     )
     return WorkflowStepExecutionContext(
+        data_path=WorkflowDataPath(
+            result_path=(tmp_path / "data-result").resolve(),
+            workspace_path=(tmp_path / "data-workspace").resolve(),
+        ),
         result_dir=tmp_path,
+        run_context=WorkflowRunContext(
+            interface_major_version=2,
+            version=1,
+            workflow_id="workflow-id",
+            workflow_name="recovery",
+            workflow_run_id="20260719123456789",
+            workflow_run_timestamp=datetime(2026, 7, 19, 12, 34, 56, 789000, tzinfo=UTC),
+            workflow_source_id="source-id",
+            workflow_source_version_id="source-version-id",
+        ),
         runtime_capability=WorkflowRuntimeCapability(browser=None),
         step_instance_dir=workflow_instance_dir / "step" / "recovery",
         workflow_input_path=Path("workflow/run/input.json"),
@@ -371,7 +387,21 @@ def _workflow_context_get(tmp_path: Path, *, instance_key: str) -> WorkflowExecu
     """Build one stable workflow execution context."""
 
     return WorkflowExecutionContext(
+        data_path=WorkflowDataPath(
+            result_path=(tmp_path / "data-result").resolve(),
+            workspace_path=(tmp_path / "data-workspace").resolve(),
+        ),
         result_dir=tmp_path,
+        run_context=WorkflowRunContext(
+            interface_major_version=2,
+            version=1,
+            workflow_id="workflow-id",
+            workflow_name="recovery",
+            workflow_run_id="20260719123456789",
+            workflow_run_timestamp=datetime(2026, 7, 19, 12, 34, 56, 789000, tzinfo=UTC),
+            workflow_source_id="source-id",
+            workflow_source_version_id="source-version-id",
+        ),
         runtime_capability=WorkflowRuntimeCapability(browser=None),
         workflow_instance_dir=tmp_path / "workflow" / instance_key,
     )

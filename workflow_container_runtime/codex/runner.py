@@ -151,7 +151,7 @@ class CodexRunner:
         schema_path = diagnostic_dir / "schema.json"
         stderr_path = diagnostic_dir / "stderr.txt"
         event_path = diagnostic_dir / "event.jsonl"
-        self._terminal_diagnostic_remove(
+        self._final_diagnostic_remove(
             event_path=event_path,
             output_path=output_path,
             stderr_path=stderr_path,
@@ -301,7 +301,7 @@ class CodexRunner:
             output_path: `codex exec --output-last-message` path.
 
         Returns:
-            Whether the attempt has enough terminal artifacts to stop a stuck process tree.
+            Whether the attempt has enough final artifacts to stop a stuck process tree.
         """
         if output_path is None or not output_path.is_file() or output_path.stat().st_size == 0:
             return False
@@ -416,7 +416,7 @@ class CodexRunner:
 
         Args:
             event_path: Append-only Codex JSONL event stream path.
-            final: Whether this is the terminal stdout snapshot.
+            final: Whether this is the final stdout snapshot.
             persisted_stdout_offset: Character offset persisted from earlier cumulative snapshots.
             stdout_snapshot: Current cumulative stdout snapshot.
 
@@ -645,16 +645,16 @@ class CodexRunner:
                 )
                 return subprocess.CompletedProcess(args=command, returncode=124, stdout=stdout, stderr=timeout_stderr)
 
-    def _terminal_diagnostic_remove(self, *, event_path: Path, output_path: Path, stderr_path: Path) -> None:
-        """Remove stale terminal diagnostics before one Codex subprocess starts.
+    def _final_diagnostic_remove(self, *, event_path: Path, output_path: Path, stderr_path: Path) -> None:
+        """Remove stale final diagnostics before one Codex subprocess starts.
 
         Args:
             event_path: Codex JSON event stream path.
             output_path: Final Codex message output path.
             stderr_path: Captured stderr path.
         """
-        for terminal_path in [output_path, stderr_path, event_path]:
-            terminal_path.unlink(missing_ok=True)
+        for diagnostic_path in [output_path, stderr_path, event_path]:
+            diagnostic_path.unlink(missing_ok=True)
 
 
 __all__ = [

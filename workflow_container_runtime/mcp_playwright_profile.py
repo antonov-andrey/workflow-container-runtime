@@ -16,11 +16,11 @@ from pydantic import BaseModel, ConfigDict
 from workflow_container_contract import (
     McpPlaywrightProfileWritebackCandidateRequest,
     McpPlaywrightProfileWritebackPolicy,
-    WorkflowControlSafepointRequest,
 )
 
 from workflow_container_runtime.capability import BrowserRuntimeCapability, WorkflowRuntimeCapability
 from workflow_container_runtime.platform import WorkflowControlClient, WorkflowControlRequestError
+from workflow_container_runtime.request import WorkflowControlRequestBuilder
 
 _MCP_PLAYWRIGHT_PROFILE_NAME_PATTERN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_-]{0,126}[A-Za-z0-9])?")
 
@@ -94,6 +94,7 @@ class McpPlaywrightProfileRuntime:
         mcp_playwright_profile_writeback_candidate_http_timeout_seconds: float = 30.0,
         urlopen: _HttpOpen = urlopen,
         workflow_control_client: WorkflowControlClient | None = None,
+        workflow_control_request_builder: WorkflowControlRequestBuilder | None = None,
     ) -> None:
         """Initialize an empty run-profile lock registry and HTTP request boundary.
 
@@ -101,6 +102,7 @@ class McpPlaywrightProfileRuntime:
             mcp_playwright_profile_writeback_candidate_http_timeout_seconds: Runtime control-call timeout in seconds.
             urlopen: Standard-library-compatible HTTP request callable.
             workflow_control_client: Current execution control adapter required by `working` writeback.
+            workflow_control_request_builder: Exact source request builder required by `working` writeback.
 
         Raises:
             ValueError: If the candidate HTTP timeout is not finite and positive.
@@ -118,6 +120,7 @@ class McpPlaywrightProfileRuntime:
         )
         self._urlopen = urlopen
         self._workflow_control_client = workflow_control_client
+        self._workflow_control_request_builder = workflow_control_request_builder
 
     @contextmanager
     def lease(
@@ -181,6 +184,7 @@ class McpPlaywrightProfileRuntime:
         *,
         policy: McpPlaywrightProfileWritebackPolicy,
         step_identity: str,
+        step_key: str,
         transition_identity: str,
     ) -> None:
         """Stage one policy-selected profile and accept its required working safepoint.
@@ -189,6 +193,7 @@ class McpPlaywrightProfileRuntime:
             route: Current leased profile route after successful semantic verification.
             policy: Exact run-owned profile writeback policy.
             step_identity: Stable owning workflow step identity.
+            step_key: Source-declared workflow step key.
             transition_identity: Stable owning step-completion transition identity.
 
         Raises:
@@ -238,12 +243,13 @@ class McpPlaywrightProfileRuntime:
                 f"Playwright profile candidate endpoint transport failed: {error}"
             ) from error
         if "working" in policy.workflow_run_status_list:
-            if self._workflow_control_client is None:
-                raise RuntimeError("working profile writeback requires a workflow control client")
+            if self._workflow_control_client is None or self._workflow_control_request_builder is None:
+                raise RuntimeError("working profile writeback requires workflow control client and request builder")
             self._workflow_control_client.safepoint_send(
-                request=WorkflowControlSafepointRequest(
-                    publication_request_list=[],
+                request=self._workflow_control_request_builder.safepoint_build(
+                    manifest_request_list=[],
                     step_identity=step_identity,
+                    step_key=step_key,
                     transition_identity=transition_identity,
                 )
             )

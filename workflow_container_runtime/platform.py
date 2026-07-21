@@ -17,9 +17,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from workflow_container_contract import (
     WorkflowControlCancellationResponse,
     WorkflowControlErrorResponse,
+    WorkflowControlFinalRequest,
     WorkflowControlRegistrationRequest,
     WorkflowControlSafepointRequest,
-    WorkflowControlTerminalRequest,
+    WorkflowRunContext,
 )
 
 _CONTROL_RETRY_INTERVAL_SECONDS = 1.0
@@ -72,12 +73,12 @@ class WorkflowPlatformRuntimeConfig(BaseModel):
     capability_config_path: Path
     control_url: str = Field(min_length=1)
     input_path: Path
-    run_id: str = Field(min_length=1)
+    run_context: WorkflowRunContext
     runtime_path: Path
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> Self:
-        """Build the runtime config from the five standard environment values.
+        """Build the runtime config from the six standard environment values.
 
         Args:
             environment: Process environment mapping.
@@ -94,6 +95,7 @@ class WorkflowPlatformRuntimeConfig(BaseModel):
             "control_url": environment.get("WORKFLOW_CONTROL_URL", ""),
             "input_path": environment.get("WORKFLOW_INPUT_PATH", ""),
             "run_id": environment.get("WORKFLOW_RUN_ID", ""),
+            "run_context_path": environment.get("WORKFLOW_RUN_CONTEXT_PATH", ""),
             "runtime_path": environment.get("WORKFLOW_RUNTIME_PATH", ""),
         }
         missing_field_name_list = [
@@ -103,11 +105,20 @@ class WorkflowPlatformRuntimeConfig(BaseModel):
             raise RuntimeError(
                 "Workflow platform environment is incomplete: " + ", ".join(sorted(missing_field_name_list))
             )
+        run_context_path = Path(value_by_field_name_map["run_context_path"])
+        if not run_context_path.is_absolute():
+            raise RuntimeError("WORKFLOW_RUN_CONTEXT_PATH must be absolute")
+        try:
+            run_context = WorkflowRunContext.model_validate_json(run_context_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"Workflow run context is invalid: {exc}") from exc
+        if run_context.workflow_run_id != value_by_field_name_map["run_id"]:
+            raise RuntimeError("WORKFLOW_RUN_ID does not match the immutable workflow run context")
         return cls(
             capability_config_path=Path(value_by_field_name_map["capability_config_path"]),
             control_url=value_by_field_name_map["control_url"],
             input_path=Path(value_by_field_name_map["input_path"]),
-            run_id=value_by_field_name_map["run_id"],
+            run_context=run_context,
             runtime_path=Path(value_by_field_name_map["runtime_path"]),
         )
 
@@ -142,6 +153,8 @@ class WorkflowPlatformRuntimeConfig(BaseModel):
         split_url = urlsplit(value)
         if split_url.scheme not in {"http", "https"} or not split_url.netloc or split_url.query or split_url.fragment:
             raise ValueError("WORKFLOW_CONTROL_URL must be an HTTP base URL without query or fragment")
+        if not split_url.path.rstrip("/").endswith("/v2"):
+            raise ValueError("WORKFLOW_CONTROL_URL must select the WorkflowSourceInterface v2 control surface")
         return value.rstrip("/")
 
 
@@ -169,6 +182,8 @@ class WorkflowControlClient:
         split_url = urlsplit(control_url)
         if split_url.scheme not in {"http", "https"} or not split_url.netloc or split_url.query or split_url.fragment:
             raise ValueError("workflow control URL must be an HTTP base URL without query or fragment")
+        if not split_url.path.rstrip("/").endswith("/v2"):
+            raise ValueError("workflow control URL must select the WorkflowSourceInterface v2 control surface")
         if not isfinite(http_timeout_seconds) or http_timeout_seconds <= 0:
             raise ValueError("workflow control HTTP timeout must be finite positive seconds")
         self._control_url = control_url.rstrip("/")
@@ -207,14 +222,14 @@ class WorkflowControlClient:
 
         self._request(operation_name="safepoint", request_payload=request, expected_status=204)
 
-    def terminal_send(self, *, request: WorkflowControlTerminalRequest) -> None:
-        """Persist one terminal intent before the source process exits.
+    def final_send(self, *, request: WorkflowControlFinalRequest) -> None:
+        """Persist one end-of-work intent before the source process exits.
 
         Args:
-            request: Canonical terminal result and publication request.
+            request: Canonical final result and manifest request.
         """
 
-        self._request(operation_name="terminal", request_payload=request, expected_status=202)
+        self._request(operation_name="final", request_payload=request, expected_status=202)
 
     def _request(
         self,
