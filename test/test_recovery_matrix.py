@@ -17,7 +17,7 @@ from workflow_container_runtime.artifact import (
     ArtifactMaterializer,
     JsonArtifactWriter,
 )
-from workflow_container_runtime.capability import BrowserRuntimeCapability
+from workflow_container_runtime.capability import BrowserRuntimeCapability, NetworkProxyRuntimeCapability
 from workflow_container_runtime.codex import CodexExecutionError
 from workflow_container_runtime.mcp_playwright_profile import McpPlaywrightProfileRuntime
 from workflow_container_runtime.prompt.renderer import PromptRenderer
@@ -127,6 +127,7 @@ class RecoveryRecord(RecoveryModel):
 RECOVERY_STEP_CONFIG = RecoveryStepConfig(
     correction_attempt_limit=2,
     instruction="",
+    mcp_playwright_network_proxy_name=None,
     mcp_playwright_profile=None,
     mcp_playwright_profile_source=None,
     model="gpt-5.6-terra",
@@ -377,7 +378,10 @@ def _step_context_get(tmp_path: Path) -> WorkflowStepExecutionContext:
             workflow_source_id="source-id",
             workflow_source_version_id="source-version-id",
         ),
-        runtime_capability=WorkflowRuntimeCapability(browser=None),
+        runtime_capability=WorkflowRuntimeCapability(
+            browser=None,
+            network_proxy=NetworkProxyRuntimeCapability(proxy_by_name_map={}),
+        ),
         step_instance_dir=workflow_instance_dir / "step" / "recovery",
         workflow_input_path=Path("workflow/run/input.json"),
     )
@@ -402,7 +406,10 @@ def _workflow_context_get(tmp_path: Path, *, instance_key: str) -> WorkflowExecu
             workflow_source_id="source-id",
             workflow_source_version_id="source-version-id",
         ),
-        runtime_capability=WorkflowRuntimeCapability(browser=None),
+        runtime_capability=WorkflowRuntimeCapability(
+            browser=None,
+            network_proxy=NetworkProxyRuntimeCapability(proxy_by_name_map={}),
+        ),
         workflow_instance_dir=tmp_path / "workflow" / instance_key,
     )
 
@@ -438,6 +445,7 @@ def _concurrent_config_get() -> RecoveryConcurrentStepConfig:
         concurrency=2,
         correction_attempt_limit=0,
         instruction="",
+        mcp_playwright_network_proxy_name=None,
         mcp_playwright_profile=None,
         mcp_playwright_profile_source=None,
         model="gpt-5.6-terra",
@@ -963,6 +971,7 @@ def test_codex_concurrent_step_returns_input_order_with_bounded_dbos_dispatch(
         concurrency=2,
         correction_attempt_limit=0,
         instruction="",
+        mcp_playwright_network_proxy_name=None,
         mcp_playwright_profile=None,
         mcp_playwright_profile_source=None,
         model="gpt-5.6-terra",
@@ -1026,7 +1035,8 @@ def test_codex_concurrent_step_does_not_serialize_one_shared_browser_endpoint(
                     mcp_playwright_profile_source="data-source-profile",
                     mcp_playwright_profile_writeback_candidate_url="http://platform/candidate",
                     mcp_url="http://browser-mcp:8931/mcp",
-                )
+                ),
+                network_proxy=NetworkProxyRuntimeCapability(proxy_by_name_map={}),
             )
         }
     )
@@ -1079,6 +1089,7 @@ def test_concurrent_step_uses_fixed_profile_lanes_in_original_order(
         concurrency=2,
         correction_attempt_limit=0,
         instruction="",
+        mcp_playwright_network_proxy_name=None,
         mcp_playwright_profile="target",
         mcp_playwright_profile_source=None,
         model="gpt-5.6-terra",
@@ -1154,6 +1165,7 @@ def test_codex_concurrent_step_waits_for_all_work_before_raising_lowest_index_er
         concurrency=3,
         correction_attempt_limit=0,
         instruction="",
+        mcp_playwright_network_proxy_name=None,
         mcp_playwright_profile=None,
         mcp_playwright_profile_source=None,
         model="gpt-5.6-terra",

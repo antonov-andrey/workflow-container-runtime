@@ -81,6 +81,7 @@ class McpPlaywrightProfileRoute(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True, validate_assignment=True, validate_default=True)
 
     action_runtime_capability: WorkflowRuntimeCapability
+    mcp_playwright_network_proxy_name: str | None
     mcp_playwright_profile: str | None
     verification_runtime_capability: WorkflowRuntimeCapability
 
@@ -113,7 +114,9 @@ class McpPlaywrightProfileRuntime:
             or mcp_playwright_profile_writeback_candidate_http_timeout_seconds <= 0
         ):
             raise ValueError("Playwright profile writeback candidate HTTP timeout must be finite positive seconds")
-        self._lock_by_runtime_profile_map: WeakValueDictionary[tuple[str, str], Lock] = WeakValueDictionary()
+        self._lock_by_runtime_profile_map: WeakValueDictionary[tuple[str, str, str | None], Lock] = (
+            WeakValueDictionary()
+        )
         self._lock_map_guard = Lock()
         self._mcp_playwright_profile_writeback_candidate_http_timeout_seconds = (
             mcp_playwright_profile_writeback_candidate_http_timeout_seconds
@@ -126,6 +129,7 @@ class McpPlaywrightProfileRuntime:
     def lease(
         self,
         *,
+        mcp_playwright_network_proxy_name: str | None = None,
         mcp_playwright_profile: str | None,
         mcp_playwright_profile_source: str | None,
         runtime_capability: WorkflowRuntimeCapability,
@@ -133,6 +137,7 @@ class McpPlaywrightProfileRuntime:
         """Lease one physical target and expose action and verification routes.
 
         Args:
+            mcp_playwright_network_proxy_name: Exact browser proxy name, or `None` for direct egress.
             mcp_playwright_profile: Exact physical target profile, or `None` for isolated execution.
             mcp_playwright_profile_source: Exact physical source copied before each action connection.
             runtime_capability: Complete capability supplied for the current workflow run.
@@ -147,6 +152,7 @@ class McpPlaywrightProfileRuntime:
 
         if mcp_playwright_profile_source is not None and mcp_playwright_profile is None:
             raise ValueError("Playwright profile source requires a target profile")
+        runtime_capability.network_proxy.proxy_url_get(mcp_playwright_network_proxy_name)
         if mcp_playwright_profile is not None:
             mcp_playwright_profile_name_validate(mcp_playwright_profile)
         if mcp_playwright_profile_source is not None:
@@ -154,10 +160,11 @@ class McpPlaywrightProfileRuntime:
         if mcp_playwright_profile_source == mcp_playwright_profile and mcp_playwright_profile is not None:
             raise ValueError("Playwright profile source and target must differ")
         browser = runtime_capability.browser
-        if mcp_playwright_profile is not None and browser is None:
-            raise RuntimeError("configured Playwright profile requires a browser capability")
+        if (mcp_playwright_network_proxy_name is not None or mcp_playwright_profile is not None) and browser is None:
+            raise RuntimeError("configured Playwright route requires a browser capability")
         route = self._route_get(
             browser=browser,
+            mcp_playwright_network_proxy_name=mcp_playwright_network_proxy_name,
             mcp_playwright_profile=mcp_playwright_profile,
             mcp_playwright_profile_source=mcp_playwright_profile_source,
             runtime_capability=runtime_capability,
@@ -169,6 +176,7 @@ class McpPlaywrightProfileRuntime:
         runtime_profile_key = (
             urlunsplit((split_mcp_url.scheme, split_mcp_url.netloc, split_mcp_url.path, "", "")),
             mcp_playwright_profile,
+            mcp_playwright_network_proxy_name,
         )
         with self._lock_map_guard:
             profile_lock = self._lock_by_runtime_profile_map.get(runtime_profile_key)
@@ -212,6 +220,7 @@ class McpPlaywrightProfileRuntime:
             raise RuntimeError("configured Playwright profile requires a browser capability")
         candidate_url = self._url_get(
             base_url=browser.mcp_playwright_profile_writeback_candidate_url,
+            mcp_playwright_network_proxy_name=route.mcp_playwright_network_proxy_name,
             mcp_playwright_profile=profile_name,
             mcp_playwright_profile_source=None,
         )
@@ -258,15 +267,17 @@ class McpPlaywrightProfileRuntime:
         self,
         *,
         browser: BrowserRuntimeCapability | None,
+        mcp_playwright_network_proxy_name: str | None,
         mcp_playwright_profile: str | None,
         mcp_playwright_profile_source: str | None,
         runtime_capability: WorkflowRuntimeCapability,
     ) -> McpPlaywrightProfileRoute:
         """Build immutable phase-specific capability snapshots."""
 
-        if browser is None or mcp_playwright_profile is None:
+        if browser is None:
             return McpPlaywrightProfileRoute(
                 action_runtime_capability=runtime_capability,
+                mcp_playwright_network_proxy_name=mcp_playwright_network_proxy_name,
                 mcp_playwright_profile=mcp_playwright_profile,
                 verification_runtime_capability=runtime_capability,
             )
@@ -275,6 +286,7 @@ class McpPlaywrightProfileRuntime:
             mcp_playwright_profile_writeback_candidate_url=browser.mcp_playwright_profile_writeback_candidate_url,
             mcp_url=self._url_get(
                 base_url=browser.mcp_url,
+                mcp_playwright_network_proxy_name=mcp_playwright_network_proxy_name,
                 mcp_playwright_profile=mcp_playwright_profile,
                 mcp_playwright_profile_source=mcp_playwright_profile_source,
             ),
@@ -284,21 +296,30 @@ class McpPlaywrightProfileRuntime:
             mcp_playwright_profile_writeback_candidate_url=browser.mcp_playwright_profile_writeback_candidate_url,
             mcp_url=self._url_get(
                 base_url=browser.mcp_url,
+                mcp_playwright_network_proxy_name=mcp_playwright_network_proxy_name,
                 mcp_playwright_profile=mcp_playwright_profile,
                 mcp_playwright_profile_source=None,
             ),
         )
         return McpPlaywrightProfileRoute(
-            action_runtime_capability=WorkflowRuntimeCapability(browser=action_browser),
+            action_runtime_capability=WorkflowRuntimeCapability(
+                browser=action_browser,
+                network_proxy=runtime_capability.network_proxy,
+            ),
+            mcp_playwright_network_proxy_name=mcp_playwright_network_proxy_name,
             mcp_playwright_profile=mcp_playwright_profile,
-            verification_runtime_capability=WorkflowRuntimeCapability(browser=verification_browser),
+            verification_runtime_capability=WorkflowRuntimeCapability(
+                browser=verification_browser,
+                network_proxy=runtime_capability.network_proxy,
+            ),
         )
 
     def _url_get(
         self,
         *,
         base_url: str,
-        mcp_playwright_profile: str,
+        mcp_playwright_network_proxy_name: str | None,
+        mcp_playwright_profile: str | None,
         mcp_playwright_profile_source: str | None,
     ) -> str:
         """Replace router-owned query values while preserving all caller-owned values."""
@@ -307,11 +328,14 @@ class McpPlaywrightProfileRuntime:
         query_item_list = [
             (name, value)
             for name, value in parse_qsl(split_url.query, keep_blank_values=True)
-            if name not in {"profile", "profile_source"}
+            if name not in {"network_proxy_name", "profile", "profile_source"}
         ]
-        query_item_list.append(("profile", mcp_playwright_profile))
+        if mcp_playwright_profile is not None:
+            query_item_list.append(("profile", mcp_playwright_profile))
         if mcp_playwright_profile_source is not None:
             query_item_list.append(("profile_source", mcp_playwright_profile_source))
+        if mcp_playwright_network_proxy_name is not None:
+            query_item_list.append(("network_proxy_name", mcp_playwright_network_proxy_name))
         return urlunsplit(
             (split_url.scheme, split_url.netloc, split_url.path, urlencode(query_item_list), split_url.fragment)
         )

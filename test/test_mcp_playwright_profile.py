@@ -15,7 +15,11 @@ import pytest
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from workflow_container_contract import McpPlaywrightProfileWritebackPolicy, WorkflowDefinition, WorkflowInputSchema
 
-from workflow_container_runtime.capability import BrowserRuntimeCapability, WorkflowRuntimeCapability
+from workflow_container_runtime.capability import (
+    BrowserRuntimeCapability,
+    NetworkProxyRuntimeCapability,
+    WorkflowRuntimeCapability,
+)
 from workflow_container_runtime.mcp_playwright_profile import McpPlaywrightProfileRoute, McpPlaywrightProfileRuntime
 from workflow_container_runtime.platform import WorkflowControlClient, WorkflowControlRequestError
 from workflow_container_runtime.request import WorkflowControlRequestBuilder
@@ -104,10 +108,16 @@ def _browser_capability_get(
 def _runtime_capability_get(
     *,
     mcp_url: str = "http://browser:8931/mcp",
+    proxy_by_name_map: dict[str, str] | None = None,
 ) -> WorkflowRuntimeCapability:
     """Build one workflow capability with browser routing enabled."""
 
-    return WorkflowRuntimeCapability(browser=_browser_capability_get(mcp_url=mcp_url))
+    return WorkflowRuntimeCapability(
+        browser=_browser_capability_get(mcp_url=mcp_url),
+        network_proxy=NetworkProxyRuntimeCapability(
+            proxy_by_name_map={} if proxy_by_name_map is None else proxy_by_name_map
+        ),
+    )
 
 
 def _workflow_control_request_builder_get() -> WorkflowControlRequestBuilder:
@@ -135,6 +145,7 @@ def test_profile_runtime_exposes_exact_public_method_signatures() -> None:
 
     assert list(inspect.signature(McpPlaywrightProfileRuntime.lease).parameters) == [
         "self",
+        "mcp_playwright_network_proxy_name",
         "mcp_playwright_profile",
         "mcp_playwright_profile_source",
         "runtime_capability",
@@ -190,6 +201,7 @@ def test_step_profile_fields_are_required_nullable_and_validate_relationships(pr
     common = {
         "correction_attempt_limit": 1,
         "instruction": "",
+        "mcp_playwright_network_proxy_name": None,
         "model": "gpt-5.6-terra",
         "reasoning_effort": "high",
     }
@@ -230,6 +242,7 @@ def test_concurrent_step_config_owns_exact_physical_profile_names() -> None:
         "concurrency": 2,
         "correction_attempt_limit": 1,
         "instruction": "",
+        "mcp_playwright_network_proxy_name": None,
         "model": "gpt-5.6-terra",
         "reasoning_effort": "high",
     }
@@ -258,9 +271,12 @@ def test_concurrent_step_config_owns_exact_physical_profile_names() -> None:
 def test_profile_runtime_builds_distinct_action_and_verification_capabilities() -> None:
     """Route action through reset source and verification through the continued target."""
 
-    runtime_capability = _runtime_capability_get()
+    runtime_capability = _runtime_capability_get(
+        proxy_by_name_map={"328193012345678901/tr": "socks5://workflow-run-vpn-tr:1080"}
+    )
 
     with McpPlaywrightProfileRuntime().lease(
+        mcp_playwright_network_proxy_name="328193012345678901/tr",
         mcp_playwright_profile="target",
         mcp_playwright_profile_source="source-1",
         runtime_capability=runtime_capability,
@@ -269,10 +285,15 @@ def test_profile_runtime_builds_distinct_action_and_verification_capabilities() 
         verification_browser = route.verification_runtime_capability.browser
         assert action_browser is not None
         assert verification_browser is not None
-        assert action_browser.mcp_url.endswith("?profile=target&profile_source=source-1")
-        assert verification_browser.mcp_url.endswith("?profile=target")
+        assert action_browser.mcp_url.endswith(
+            "?profile=target&profile_source=source-1&network_proxy_name=328193012345678901%2Ftr"
+        )
+        assert verification_browser.mcp_url.endswith("?profile=target&network_proxy_name=328193012345678901%2Ftr")
         assert action_browser.mcp_playwright_profile_source == "data-source-profile"
         assert verification_browser.mcp_playwright_profile_source == "data-source-profile"
+        assert route.mcp_playwright_network_proxy_name == "328193012345678901/tr"
+        assert route.action_runtime_capability.network_proxy == runtime_capability.network_proxy
+        assert route.verification_runtime_capability.network_proxy == runtime_capability.network_proxy
 
 
 def test_unprofiled_route_keeps_base_mcp_url() -> None:
@@ -345,7 +366,10 @@ def test_profile_runtime_rejects_invalid_routes_and_missing_browser_capability()
         with runtime.lease(
             mcp_playwright_profile="target",
             mcp_playwright_profile_source=None,
-            runtime_capability=WorkflowRuntimeCapability(browser=None),
+            runtime_capability=WorkflowRuntimeCapability(
+                browser=None,
+                network_proxy=NetworkProxyRuntimeCapability(proxy_by_name_map={}),
+            ),
         ):
             pass
 
@@ -370,7 +394,10 @@ def test_no_browser_unprofiled_route_and_candidate_are_no_ops() -> None:
     """Allow one non-browser lifecycle without routing or publication work."""
 
     runtime = McpPlaywrightProfileRuntime()
-    runtime_capability = WorkflowRuntimeCapability(browser=None)
+    runtime_capability = WorkflowRuntimeCapability(
+        browser=None,
+        network_proxy=NetworkProxyRuntimeCapability(proxy_by_name_map={}),
+    )
 
     with runtime.lease(
         mcp_playwright_profile=None,
@@ -436,9 +463,12 @@ def test_candidate_publication_posts_exact_empty_body_and_requires_204() -> None
         urlopen=urlopen,
     )
     with runtime.lease(
+        mcp_playwright_network_proxy_name="328193012345678901/tr",
         mcp_playwright_profile="target_one",
         mcp_playwright_profile_source=None,
-        runtime_capability=_runtime_capability_get(),
+        runtime_capability=_runtime_capability_get(
+            proxy_by_name_map={"328193012345678901/tr": "socks5://workflow-run-vpn-tr:1080"}
+        ),
     ) as route:
         runtime.writeback_candidate_stage(
             route,
@@ -457,6 +487,7 @@ def test_candidate_publication_posts_exact_empty_body_and_requires_204() -> None
     assert parse_qsl(urlsplit(request.full_url).query) == [  # type: ignore[attr-defined]
         ("token", "run"),
         ("profile", "target_one"),
+        ("network_proxy_name", "328193012345678901/tr"),
     ]
     assert timeout_list == [12.5]
 
@@ -568,13 +599,18 @@ def test_profile_runtime_rejects_non_positive_or_non_finite_candidate_http_timeo
 
 
 def test_profile_runtime_serializes_only_the_same_run_local_profile() -> None:
-    """Serialize one run-local profile without coupling distinct profiles or WorkflowRuns."""
+    """Serialize only one exact run, profile, and proxy route identity."""
 
-    runtime_capability = _runtime_capability_get()
+    proxy_by_name_map = {
+        "328193012345678901/tr": "socks5://workflow-run-vpn-tr:1080",
+        "328193012345678901/us": "socks5://workflow-run-vpn-us:1080",
+    }
+    runtime_capability = _runtime_capability_get(proxy_by_name_map=proxy_by_name_map)
     candidate_started = Event()
     release_candidate = Event()
     same_entered = Event()
     distinct_entered = Event()
+    distinct_proxy_entered = Event()
     distinct_run_entered = Event()
 
     def urlopen(request: object, *, timeout: float) -> FakeHttpResponse:
@@ -591,6 +627,7 @@ def test_profile_runtime_serializes_only_the_same_run_local_profile() -> None:
         """Publish the first target candidate before releasing its lifecycle lease."""
 
         with runtime.lease(
+            mcp_playwright_network_proxy_name="328193012345678901/tr",
             mcp_playwright_profile="target-1",
             mcp_playwright_profile_source=None,
             runtime_capability=runtime_capability,
@@ -604,6 +641,7 @@ def test_profile_runtime_serializes_only_the_same_run_local_profile() -> None:
             )
 
     def enter(
+        network_proxy_name: str,
         profile: str,
         entered: Event,
         competing_runtime_capability: WorkflowRuntimeCapability,
@@ -612,35 +650,59 @@ def test_profile_runtime_serializes_only_the_same_run_local_profile() -> None:
 
         candidate_started.wait(timeout=2)
         with runtime.lease(
+            mcp_playwright_network_proxy_name=network_proxy_name,
             mcp_playwright_profile=profile,
             mcp_playwright_profile_source=None,
             runtime_capability=competing_runtime_capability,
         ):
             entered.set()
 
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor:
         first_future = executor.submit(hold_first)
         same_future = executor.submit(
             enter,
+            "328193012345678901/tr",
             "target-1",
             same_entered,
-            _runtime_capability_get(mcp_url="http://browser:8931/mcp?transport=alternate"),
+            _runtime_capability_get(
+                mcp_url="http://browser:8931/mcp?transport=alternate",
+                proxy_by_name_map=proxy_by_name_map,
+            ),
         )
-        distinct_future = executor.submit(enter, "target-2", distinct_entered, runtime_capability)
+        distinct_future = executor.submit(
+            enter,
+            "328193012345678901/tr",
+            "target-2",
+            distinct_entered,
+            runtime_capability,
+        )
+        distinct_proxy_future = executor.submit(
+            enter,
+            "328193012345678901/us",
+            "target-1",
+            distinct_proxy_entered,
+            runtime_capability,
+        )
         distinct_run_future = executor.submit(
             enter,
+            "328193012345678901/tr",
             "target-1",
             distinct_run_entered,
-            _runtime_capability_get(mcp_url="http://other-run-browser:8931/mcp"),
+            _runtime_capability_get(
+                mcp_url="http://other-run-browser:8931/mcp",
+                proxy_by_name_map=proxy_by_name_map,
+            ),
         )
         assert candidate_started.wait(timeout=1)
         assert distinct_entered.wait(timeout=1)
+        assert distinct_proxy_entered.wait(timeout=1)
         assert distinct_run_entered.wait(timeout=1)
         assert not same_entered.wait(timeout=0.05)
         release_candidate.set()
         first_future.result(timeout=2)
         same_future.result(timeout=2)
         distinct_future.result(timeout=2)
+        distinct_proxy_future.result(timeout=2)
         distinct_run_future.result(timeout=2)
 
     assert same_entered.is_set()

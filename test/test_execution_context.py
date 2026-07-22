@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 from workflow_container_contract import WorkflowRunContext
 
-from workflow_container_runtime.capability import BrowserRuntimeCapability
+from workflow_container_runtime.capability import BrowserRuntimeCapability, NetworkProxyRuntimeCapability
 from workflow_container_runtime.step.context import WorkflowStepExecutionContext
 from workflow_container_runtime.workflow.context import WorkflowExecutionContext, WorkflowRuntimeCapability
 from workflow_container_runtime.data import WorkflowDataPath
@@ -49,7 +49,8 @@ def test_workflow_context_builds_deterministic_child_directories(tmp_path: Path)
             mcp_playwright_profile_source="data-source-profile",
             mcp_playwright_profile_writeback_candidate_url="http://platform/control/candidate",
             mcp_url="http://browser/mcp",
-        )
+        ),
+        network_proxy=NetworkProxyRuntimeCapability(proxy_by_name_map={}),
     )
     context = WorkflowExecutionContext(
         **_context_value_by_name_map_get(tmp_path),
@@ -77,7 +78,10 @@ def test_workflow_context_rejects_paths_outside_result_root(tmp_path: Path) -> N
         WorkflowExecutionContext(
             **_context_value_by_name_map_get(tmp_path),
             result_dir=tmp_path / "inside",
-            runtime_capability=WorkflowRuntimeCapability(browser=None),
+            runtime_capability=WorkflowRuntimeCapability(
+                browser=None,
+                network_proxy=NetworkProxyRuntimeCapability(proxy_by_name_map={}),
+            ),
             workflow_instance_dir=tmp_path / "outside",
         )
 
@@ -95,7 +99,10 @@ def test_workflow_context_rejects_symlink_escape(tmp_path: Path) -> None:
         WorkflowExecutionContext(
             **_context_value_by_name_map_get(tmp_path),
             result_dir=result_dir,
-            runtime_capability=WorkflowRuntimeCapability(browser=None),
+            runtime_capability=WorkflowRuntimeCapability(
+                browser=None,
+                network_proxy=NetworkProxyRuntimeCapability(proxy_by_name_map={}),
+            ),
             workflow_instance_dir=result_dir / "workflow" / "run",
         )
 
@@ -107,7 +114,10 @@ def test_step_context_rejects_unrelated_workflow_input_path(tmp_path: Path) -> N
         WorkflowStepExecutionContext(
             **_context_value_by_name_map_get(tmp_path),
             result_dir=tmp_path,
-            runtime_capability=WorkflowRuntimeCapability(browser=None),
+            runtime_capability=WorkflowRuntimeCapability(
+                browser=None,
+                network_proxy=NetworkProxyRuntimeCapability(proxy_by_name_map={}),
+            ),
             step_instance_dir=tmp_path / "workflow" / "run" / "step" / "source_discover",
             workflow_input_path=Path("workflow/unrelated/input.json"),
         )
@@ -126,7 +136,10 @@ def test_step_context_rejects_symlinked_workflow_input_escape(tmp_path: Path) ->
         WorkflowStepExecutionContext(
             **_context_value_by_name_map_get(tmp_path),
             result_dir=tmp_path,
-            runtime_capability=WorkflowRuntimeCapability(browser=None),
+            runtime_capability=WorkflowRuntimeCapability(
+                browser=None,
+                network_proxy=NetworkProxyRuntimeCapability(proxy_by_name_map={}),
+            ),
             step_instance_dir=workflow_instance_dir / "step" / "source_discover",
             workflow_input_path=Path("workflow/run/input.json"),
         )
@@ -139,7 +152,10 @@ def test_workflow_context_rejects_unsafe_instance_keys(tmp_path: Path, instance_
     context = WorkflowExecutionContext(
         **_context_value_by_name_map_get(tmp_path),
         result_dir=tmp_path,
-        runtime_capability=WorkflowRuntimeCapability(browser=None),
+        runtime_capability=WorkflowRuntimeCapability(
+            browser=None,
+            network_proxy=NetworkProxyRuntimeCapability(proxy_by_name_map={}),
+        ),
         workflow_instance_dir=tmp_path / "workflow" / "run",
     )
 

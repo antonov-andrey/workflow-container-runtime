@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict
 from workflow_container_contract import WorkflowResult, WorkflowRunContext
 
 from workflow_container_runtime.artifact import JsonArtifactWriter
+from workflow_container_runtime.capability import NetworkProxyRuntimeCapability
 from workflow_container_runtime.step import (
     WorkflowStepDeterministicBase,
     WorkflowStepExecutionContext,
@@ -134,7 +135,10 @@ def test_configured_dbos_workflow_publishes_typed_standard_bundle(tmp_path: Path
                 await self.input_write_step(execution_context, workflow_input)
                 step_result = self.uppercase_step(
                     execution_context.for_step(
-                        runtime_capability=WorkflowRuntimeCapability(browser=None),
+                        runtime_capability=WorkflowRuntimeCapability(
+                            browser=None,
+                            network_proxy=NetworkProxyRuntimeCapability(proxy_by_name_map={}),
+                        ),
                         step_instance_key="uppercase",
                     ),
                     IntegrationStepInputSource(value=workflow_input.value),
@@ -174,7 +178,10 @@ def test_configured_dbos_workflow_publishes_typed_standard_bundle(tmp_path: Path
                     workflow_source_id="source-id",
                     workflow_source_version_id="source-version-id",
                 ),
-                runtime_capability=WorkflowRuntimeCapability(browser=None),
+                runtime_capability=WorkflowRuntimeCapability(
+                    browser=None,
+                    network_proxy=NetworkProxyRuntimeCapability(proxy_by_name_map={}),
+                ),
                 workflow_instance_dir=workflow_instance_dir,
             )
             workflow_input = IntegrationWorkflowInput(value=input_value)

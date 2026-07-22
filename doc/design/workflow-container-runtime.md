@@ -3,16 +3,16 @@
 ## Scope
 This project owns generic executable runtime mechanics for workflow-container projects. Concrete workflow containers consume it as a pinned Python dependency.
 
-The runtime owns the generic `WorkflowBase`, `WorkflowStepBase`, deterministic-step and Codex-step lifecycles, standard workflow and step file paths, recovery state machines, `Codex` subprocess execution, structured JSON output schema handling, generic prompt resources, browser-tool event validation, atomic JSON publication, validated SQLite current state, and source-neutral external artifact-tree materialization. It also owns logical Playwright profile validation, phase-specific MCP URL routing, fixed concurrent profile lanes, and an exclusive lease scoped by the run-local MCP router URL without query or fragment plus the physical profile. Query parameters do not create a second lease identity. Invocations with distinct profiles or distinct run-local endpoints remain concurrent.
+The runtime owns the generic `WorkflowBase`, `WorkflowStepBase`, deterministic-step and Codex-step lifecycles, standard workflow and step file paths, recovery state machines, `Codex` subprocess execution, structured JSON output schema handling, generic prompt resources, browser-tool event validation, atomic JSON publication, validated SQLite current state, and source-neutral external artifact-tree materialization. It also owns logical Playwright profile validation, phase-specific MCP URL routing, exact input-configured network-proxy lookup and propagation, fixed concurrent profile lanes, and an exclusive lease scoped by the run-local MCP router URL without query or fragment plus the physical profile and exact stable network proxy name. Invocations with distinct profile/proxy pairs or distinct run-local endpoints remain concurrent.
 
-The runtime does not own concrete `DBOS` workflow topology, domain input/result/state schemas, domain validators, domain handoff construction, source behavior, extraction logic, browser/VPN process launch, OpenVPN, Playwright MCP server startup, or authoring CLI tooling.
+The runtime does not own concrete `DBOS` workflow topology, domain input/result/state schemas, domain validators, domain handoff construction, source behavior, extraction logic, browser process launch, VPN gateway launch, OpenVPN, SOCKS5, Playwright MCP server startup, or authoring CLI tooling.
 
 Shared workflow-container ecosystem authoring and code quality rules live in the `workflow-container-tools` plugin reference `references/workflow-container-authoring.md`; this document owns only runtime-specific boundaries.
 
 ## Dependency Boundary
 Concrete workflow-container projects import this package at runtime and inherit its workflow and step base classes. This package imports runtime-neutral source and result contracts from `workflow-container-contract`; it must not import concrete workflow-container projects, `workflow-container-tools`, or domain workflow code.
 
-`workflow-container-tools` owns authoring guidance and audits. `browser-vpn-runtime` owns browser/VPN processes, physical profile directories, copying, reset, and snapshots and exposes configured run-local Playwright MCP and candidate URLs to workflow containers. This runtime package builds logical profile routes and leases around those URLs, but it must not start or configure browser/VPN processes itself.
+`workflow-container-tools` owns authoring guidance and audits. `browser-runtime` owns browser processes, physical profile directories, copying, reset, snapshots, and independent backends keyed by physical profile plus optional stable network proxy name. `vpn-runtime` owns VPN gateways, OpenVPN, SOCKS5, tunnel lifecycle, and fail-closed egress. This runtime package builds logical browser routes, exact configured proxy lookup and leases around platform-provided URLs, but it must not select a proxy or start or configure either runtime.
 
 ## Platform Adapter Boundary
 `WorkflowPlatformRuntimeConfig` is the single environment adapter for `WorkflowSourceInterface` major 2. It loads the exact immutable `WorkflowRunContext` from `WORKFLOW_RUN_CONTEXT_PATH`, verifies its run identity against `WORKFLOW_RUN_ID`, and exposes the provenance model instead of duplicating its fields in package-local config.
@@ -24,6 +24,14 @@ Concrete workflow-container projects import this package at runtime and inherit 
 `WorkflowControlClient.safepoint_send(...)` is the synchronous accepted-checkpoint and optional Athena-projection barrier. A successful return proves acceptance of the requested manifests, the complete automatic `/runtime` checkpoint, and step completion. `final_send(...)` persists end-of-work intent through the `final` operation; concrete run states remain `done`, `failed`, or `cancelled`.
 
 The package does not upload Data or implement platform storage. Accepted-state restore is represented by the `/runtime` tree materialized before command startup and by idempotent replay of the same control transition identities. `JsonLinesArtifactWriter` provides atomic publication of ordered validated model rows, but dataset schema ownership and row semantics remain with the concrete workflow source.
+
+## Network Proxy Boundary
+
+The immutable capability document exposes `network_proxy.proxy_by_name_map` from the ordered deduplicated union of every schema-marked name in the complete input to run-local SOCKS5 URLs; the map is empty when the union is empty. The runtime validates one caller-supplied exact name against that map and never receives VPN config, credentials, protocol internals, or provider state.
+
+`NetworkProxyRuntimeCapability.proxy_url_get(...)` performs only exact lookup of one caller-supplied stable name in `proxy_by_name_map`; `None` means direct egress and an unknown non-null name fails. It never selects from a list, distributes invocations, or keeps routing state. Concrete workflow code reads each name from its exact source-owned field in the complete immutable workflow input. An array-valued source field remains a domain-owned explicit collection and does not acquire generic runtime selection semantics.
+
+`WorkflowStepCodexConfigBase.mcp_playwright_network_proxy_name` is an explicit nullable public input field marked by `format: network-proxy-name`. Browser routing adds that exact config value structurally as `network_proxy_name` alongside profile routing for action, verifier, retries, and recovery. The browser runtime owns the resulting backend lifecycle. The workflow runtime does not choose another proxy, does not close browser sessions merely because another step has a different exact setting, and does not treat tunnel reconnect as a workflow freeze or step retry.
 
 ## Prompt Resource Boundary
 Generic prompt partials live in this package under `workflow_container_runtime/prompt/template/`. Concrete workflow-container prompts may include them through the `runtime/` template prefix.

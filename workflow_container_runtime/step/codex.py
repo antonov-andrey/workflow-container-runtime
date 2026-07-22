@@ -1,8 +1,9 @@
 """Strict configuration, policy, and durable state for Codex-backed steps."""
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from workflow_container_contract import network_proxy_name_validate
 
 from workflow_container_runtime.artifact.materializer import ArtifactMaterializationPolicy
 from workflow_container_runtime.mcp_playwright_profile import mcp_playwright_profile_name_validate
@@ -27,6 +28,17 @@ class WorkflowStepCodexConfigBase(BaseModel):
         description="Additional instruction applied only to this step.",
         json_schema_extra={"default": "", "x-ui-control": "textarea"},
         title="Step instruction",
+    )
+    mcp_playwright_network_proxy_name: (
+        Annotated[
+            str,
+            Field(json_schema_extra={"format": "network-proxy-name"}),
+        ]
+        | None
+    ) = Field(
+        description="Exact stable network proxy used by Playwright, or null for direct egress.",
+        json_schema_extra={"default": None},
+        title="Playwright network proxy",
     )
     mcp_playwright_profile: str | None = Field(
         description="Run-local logical Playwright target profile, or null for isolated execution.",
@@ -55,6 +67,20 @@ class WorkflowStepCodexConfigBase(BaseModel):
         """Require a non-empty profile identifier without path or query syntax."""
 
         return None if value is None else mcp_playwright_profile_name_validate(value)
+
+    @field_validator("mcp_playwright_network_proxy_name")
+    @classmethod
+    def network_proxy_name_validate(cls, value: str | None) -> str | None:
+        """Require an exact owner-prefixed public proxy name when configured.
+
+        Args:
+            value: Explicit browser proxy name, or `None` for direct egress.
+
+        Returns:
+            Validated unchanged proxy name.
+        """
+
+        return None if value is None else network_proxy_name_validate(value)
 
     def mcp_playwright_profile_physical_list_get(self) -> list[str | None]:
         """Return the exact physical target profile used by a non-concurrent step.

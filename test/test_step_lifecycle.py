@@ -11,7 +11,7 @@ from workflow_container_contract import McpPlaywrightProfileWritebackPolicy, Wor
 
 from workflow_container_runtime.artifact.materializer import ArtifactMaterializationPolicy, ArtifactMaterializer
 from workflow_container_runtime.artifact.writer import JsonArtifactWriter
-from workflow_container_runtime.capability import BrowserRuntimeCapability
+from workflow_container_runtime.capability import BrowserRuntimeCapability, NetworkProxyRuntimeCapability
 from workflow_container_runtime.codex.config import CodexRunnerConfig
 from workflow_container_runtime.mcp_playwright_profile import McpPlaywrightProfileRuntime
 from workflow_container_runtime.platform import WorkflowControlRequestError
@@ -207,6 +207,7 @@ class ExampleCodexStep(
 EXAMPLE_STEP_CONFIG = ExampleStepConfig(
     correction_attempt_limit=2,
     instruction="",
+    mcp_playwright_network_proxy_name=None,
     mcp_playwright_profile=None,
     mcp_playwright_profile_source=None,
     model="gpt-5.6-terra",
@@ -257,7 +258,11 @@ def _context_get(
             workflow_source_id="source-id",
             workflow_source_version_id="source-version-id",
         ),
-        runtime_capability=runtime_capability or WorkflowRuntimeCapability(browser=None),
+        runtime_capability=runtime_capability
+        or WorkflowRuntimeCapability(
+            browser=None,
+            network_proxy=NetworkProxyRuntimeCapability(proxy_by_name_map={}),
+        ),
         step_instance_dir=workflow_instance_dir / "step" / "example_build",
         workflow_input_path=Path("workflow/run/input.json"),
     )
@@ -329,6 +334,7 @@ def test_codex_step_requires_the_exact_persisted_workflow_config(tmp_path: Path)
     mismatched_config = ExampleStepConfig(
         correction_attempt_limit=1,
         instruction="",
+        mcp_playwright_network_proxy_name=None,
         mcp_playwright_profile=None,
         mcp_playwright_profile_source=None,
         model="gpt-5.6-terra",
@@ -468,6 +474,7 @@ def test_codex_step_routes_phases_and_republishes_recovered_candidate(tmp_path: 
     config = ExampleStepConfig(
         correction_attempt_limit=1,
         instruction="",
+        mcp_playwright_network_proxy_name="328193012345678901/tr",
         mcp_playwright_profile="source-discover",
         mcp_playwright_profile_source="login-completed",
         model="gpt-5.6-terra",
@@ -478,7 +485,10 @@ def test_codex_step_routes_phases_and_republishes_recovered_candidate(tmp_path: 
             mcp_playwright_profile_source="data-source-profile",
             mcp_playwright_profile_writeback_candidate_url="http://platform/candidate",
             mcp_url="http://browser:8931/mcp",
-        )
+        ),
+        network_proxy=NetworkProxyRuntimeCapability(
+            proxy_by_name_map={"328193012345678901/tr": "socks5://workflow-run-vpn-tr:1080"}
+        ),
     )
     fake_runner = FakeCodexRunner(
         [ExampleActionOutput(output="final"), VerificationDecision(status="success", feedback_list=[])]
@@ -498,8 +508,10 @@ def test_codex_step_routes_phases_and_republishes_recovered_candidate(tmp_path: 
 
     action_browser = fake_runner.call_list[0]["runtime_capability"].browser
     verification_browser = fake_runner.call_list[1]["runtime_capability"].browser
-    assert action_browser.mcp_url.endswith("?profile=source-discover&profile_source=login-completed")
-    assert verification_browser.mcp_url.endswith("?profile=source-discover")
+    assert action_browser.mcp_url.endswith(
+        "?profile=source-discover&profile_source=login-completed&network_proxy_name=328193012345678901%2Ftr"
+    )
+    assert verification_browser.mcp_url.endswith("?profile=source-discover&network_proxy_name=328193012345678901%2Ftr")
     assert len(fake_runner.call_list) == 2
     assert len(request_list) == 2
 
@@ -547,6 +559,7 @@ def test_candidate_timeout_wraps_and_recovery_reacquires_profile_lease(tmp_path:
     config = ExampleStepConfig(
         correction_attempt_limit=1,
         instruction="",
+        mcp_playwright_network_proxy_name=None,
         mcp_playwright_profile="source-discover",
         mcp_playwright_profile_source=None,
         model="gpt-5.6-terra",
@@ -557,7 +570,8 @@ def test_candidate_timeout_wraps_and_recovery_reacquires_profile_lease(tmp_path:
             mcp_playwright_profile_source="data-source-profile",
             mcp_playwright_profile_writeback_candidate_url="http://platform/candidate",
             mcp_url="http://browser:8931/mcp",
-        )
+        ),
+        network_proxy=NetworkProxyRuntimeCapability(proxy_by_name_map={}),
     )
     fake_runner = FakeCodexRunner(
         [ExampleActionOutput(output="final"), VerificationDecision(status="success", feedback_list=[])]

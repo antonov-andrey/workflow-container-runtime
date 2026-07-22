@@ -11,6 +11,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
 import pytest
+from pydantic import ValidationError
 from workflow_container_contract import (
     WorkflowControlFinalRequest,
     WorkflowControlManifestRequest,
@@ -19,7 +20,7 @@ from workflow_container_contract import (
     WorkflowRunContext,
 )
 
-from workflow_container_runtime.capability import WorkflowRuntimeCapability
+from workflow_container_runtime.capability import NetworkProxyRuntimeCapability, WorkflowRuntimeCapability
 from workflow_container_runtime.platform import (
     WorkflowControlClient,
     WorkflowControlRequestError,
@@ -140,13 +141,18 @@ def test_runtime_capability_loads_typed_browser_config(tmp_path: Path) -> None:
     capability_path.write_text(
         json.dumps(
             {
-                "browser_vpn_runtime": {
+                "browser_runtime": {
                     "browser": {
                         "mcp_playwright_profile_source": "source",
                         "mcp_playwright_profile_writeback_candidate_url": "http://browser/candidate",
                         "mcp_url": "http://browser/mcp",
                     }
-                }
+                },
+                "network_proxy": {
+                    "proxy_by_name_map": {
+                        "328193012345678901/tr": "socks5://workflow-run-vpn-tr:1080",
+                    }
+                },
             }
         ),
         encoding="utf-8",
@@ -156,15 +162,54 @@ def test_runtime_capability_loads_typed_browser_config(tmp_path: Path) -> None:
 
     assert capability.browser is not None
     assert capability.browser.mcp_url == "http://browser/mcp"
+    assert capability.network_proxy.proxy_url_get("328193012345678901/tr") == ("socks5://workflow-run-vpn-tr:1080")
 
 
-def test_runtime_capability_allows_an_empty_platform_capability_set(tmp_path: Path) -> None:
-    """Represent an undeclared optional browser capability explicitly as absent."""
+def test_runtime_capability_requires_an_explicit_empty_network_proxy_map(tmp_path: Path) -> None:
+    """Represent absent browser infrastructure and direct network egress explicitly."""
+
+    capability_path = tmp_path / "capability.json"
+    capability_path.write_text('{"network_proxy":{"proxy_by_name_map":{}}}', encoding="utf-8")
+
+    capability = WorkflowRuntimeCapability.from_platform_config_path(capability_path)
+
+    assert capability.browser is None
+    assert capability.network_proxy.proxy_url_get(None) is None
+
+
+def test_runtime_capability_rejects_missing_network_proxy_document(tmp_path: Path) -> None:
+    """Reject a capability document that omits the standard environment map.
+
+    Args:
+        tmp_path: Isolated capability document directory.
+    """
 
     capability_path = tmp_path / "capability.json"
     capability_path.write_text("{}", encoding="utf-8")
 
-    assert WorkflowRuntimeCapability.from_platform_config_path(capability_path).browser is None
+    with pytest.raises(ValueError, match="network_proxy"):
+        WorkflowRuntimeCapability.from_platform_config_path(capability_path)
+
+
+def test_network_proxy_capability_performs_only_exact_lookup() -> None:
+    """Return only the caller-named endpoint and reject unknown or malformed values."""
+
+    capability = NetworkProxyRuntimeCapability(
+        proxy_by_name_map={
+            "328193012345678901/tr": "socks5://workflow-run-vpn-tr:1080",
+            "328193012345678901/us": "socks5://workflow-run-vpn-us:1080",
+        }
+    )
+
+    assert capability.proxy_url_get(None) is None
+    assert capability.proxy_url_get("328193012345678901/us") == "socks5://workflow-run-vpn-us:1080"
+    assert not hasattr(capability, "select")
+    with pytest.raises(ValueError, match="unavailable"):
+        capability.proxy_url_get("328193012345678901/missing")
+    with pytest.raises(ValueError, match="zitadel_user_id"):
+        capability.proxy_url_get("missing-owner-prefix")
+    with pytest.raises(ValidationError, match="credential-free"):
+        NetworkProxyRuntimeCapability(proxy_by_name_map={"328193012345678901/tr": "socks5://login:password@proxy:1080"})
 
 
 def test_control_client_sends_exact_typed_protocol_requests() -> None:

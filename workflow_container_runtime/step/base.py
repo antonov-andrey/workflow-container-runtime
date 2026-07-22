@@ -434,6 +434,7 @@ class WorkflowStepCodexBase(
         )
         step_input = self._step_input_get(execution_context, input_source)
         with self._mcp_playwright_profile_runtime.lease(
+            mcp_playwright_network_proxy_name=workflow_step_config.mcp_playwright_network_proxy_name,
             mcp_playwright_profile=mcp_playwright_profile,
             mcp_playwright_profile_source=workflow_step_config.mcp_playwright_profile_source,
             runtime_capability=execution_context.runtime_capability,

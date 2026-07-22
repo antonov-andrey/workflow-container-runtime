@@ -1,5 +1,6 @@
 """Reusable runtime mechanics for workflow-container projects."""
 
+from workflow_container_runtime.capability import NetworkProxyRuntimeCapability, WorkflowRuntimeCapability
 from workflow_container_runtime.mcp_playwright_profile import McpPlaywrightProfileRoute, McpPlaywrightProfileRuntime
 from workflow_container_runtime.platform import (
     WorkflowControlClient,
@@ -19,6 +20,7 @@ __all__ = [
     "STATE_DATABASE_FILENAME",
     "McpPlaywrightProfileRoute",
     "McpPlaywrightProfileRuntime",
+    "NetworkProxyRuntimeCapability",
     "SqliteStateCommand",
     "SqliteStateStore",
     "SqliteStateTable",
@@ -26,5 +28,6 @@ __all__ = [
     "WorkflowControlRequestError",
     "WorkflowControlRequestBuilder",
     "WorkflowPlatformRuntimeConfig",
+    "WorkflowRuntimeCapability",
     "state_database_path_get",
 ]

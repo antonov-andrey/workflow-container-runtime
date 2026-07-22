@@ -31,7 +31,7 @@ def test_setuptools_package_discovery_excludes_tests() -> None:
 def test_package_root_does_not_duplicate_distribution_version() -> None:
     """Keep distribution versioning in installed package metadata only."""
 
-    assert importlib.metadata.version("workflow-container-runtime") == "0.6.3"
+    assert importlib.metadata.version("workflow-container-runtime") == "0.7.0"
     assert not hasattr(workflow_container_runtime, "__version__")
     assert "__version__" not in workflow_container_runtime.__all__
 
@@ -99,6 +99,7 @@ def test_workflow_input_and_codex_step_config_require_every_public_field() -> No
         WorkflowStepCodexConfigBase(
             correction_attempt_limit=0,
             instruction="",
+            mcp_playwright_network_proxy_name=None,
             mcp_playwright_profile=None,
             mcp_playwright_profile_source=None,
             model="gpt-5.6-terra",
@@ -106,11 +107,16 @@ def test_workflow_input_and_codex_step_config_require_every_public_field() -> No
         )
 
     schema = WorkflowStepCodexConfigBase.model_json_schema()
+    assert schema["properties"]["mcp_playwright_network_proxy_name"]["anyOf"] == [
+        {"format": "network-proxy-name", "type": "string"},
+        {"type": "null"},
+    ]
     assert schema["properties"]["model"]["default"] == "gpt-5.6-terra"
     assert schema["properties"]["reasoning_effort"]["default"] == "high"
     assert set(schema["required"]) == {
         "correction_attempt_limit",
         "instruction",
+        "mcp_playwright_network_proxy_name",
         "mcp_playwright_profile",
         "mcp_playwright_profile_source",
         "model",

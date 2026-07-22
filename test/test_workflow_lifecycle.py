@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict
 from workflow_container_contract import WorkflowResult, WorkflowRunContext
 
 from workflow_container_runtime.artifact.writer import JsonArtifactWriter
+from workflow_container_runtime.capability import NetworkProxyRuntimeCapability
 from workflow_container_runtime.step.file import input_path_get, result_path_get, verification_path_get
 from workflow_container_runtime.verification import VerificationDecision, VerificationResult
 from workflow_container_runtime.workflow.base import WorkflowBase, WorkflowResultValidationError
@@ -66,7 +67,10 @@ def _context_get(tmp_path: Path) -> WorkflowExecutionContext:
             workflow_source_id="source-id",
             workflow_source_version_id="source-version-id",
         ),
-        runtime_capability=WorkflowRuntimeCapability(browser=None),
+        runtime_capability=WorkflowRuntimeCapability(
+            browser=None,
+            network_proxy=NetworkProxyRuntimeCapability(proxy_by_name_map={}),
+        ),
         workflow_instance_dir=tmp_path / "workflow" / "example",
     )
 
