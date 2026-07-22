@@ -6,8 +6,9 @@
 - This repository must not contain domain-specific workflow logic, source-type logic, domain extraction logic, or concrete workflow-container project names.
 - Concrete workflow-container projects depend on this repository at runtime through a pinned Python package dependency.
 - Authoring tools belong to `workflow-container-tools`, not to this repository.
-- This repository owns logical Playwright profile validation, run-local profile leasing, phase-specific MCP URL routing, concurrent lane assignment, and writeback-candidate calls.
-- Browser/VPN stack ownership belongs to `browser-vpn-runtime`; this repository must not own browser process launch, OpenVPN, physical profile directories, profile copying, stealth, locale, viewport, or package-selection behavior.
+- This repository owns logical Playwright profile validation, run-local profile leasing, phase-specific MCP URL routing, concurrent lane assignment, exact input-configured network-proxy lookup and route propagation, and writeback-candidate calls.
+- Browser process ownership belongs to `browser-runtime`; this repository must not own browser process launch, physical profile directories, profile copying, stealth, locale, viewport, or package-selection behavior.
+- VPN gateway, OpenVPN, SOCKS5, tunnel lifecycle, and leak prevention belong to `vpn-runtime`; this repository must not start or configure them.
 
 ## Python
 - Python code uses Python 3.14.
