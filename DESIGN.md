@@ -7,12 +7,12 @@ The runtime owns the generic `WorkflowBase`, `WorkflowStepBase`, deterministic-s
 
 The runtime does not own concrete `DBOS` workflow topology, domain input/result/state schemas, domain validators, domain handoff construction, source behavior, extraction logic, browser process launch, VPN gateway launch, OpenVPN, SOCKS5, Playwright MCP server startup, or authoring CLI tooling.
 
-Shared workflow-container ecosystem authoring and code quality rules live in the `workflow-container-tools` plugin reference `references/workflow-container-authoring.md`; this document owns only runtime-specific boundaries.
+Shared workflow-container ecosystem authoring and code quality rules belong to `workflow-container-agent-tools:workflow-container-developer`; this document owns only runtime-specific boundaries.
 
 ## Dependency Boundary
-Concrete workflow-container projects import this package at runtime and inherit its workflow and step base classes. This package imports runtime-neutral source and result contracts from `workflow-container-contract`; it must not import concrete workflow-container projects, `workflow-container-tools`, or domain workflow code.
+Concrete workflow-container projects import this package at runtime and inherit its workflow and step base classes. This package imports runtime-neutral source and result contracts from `workflow-container-contract`; it must not import concrete workflow-container projects, agent plugins, or domain workflow code.
 
-`workflow-container-tools` owns authoring guidance and audits. `browser-runtime` owns browser processes, physical profile directories, copying, reset, snapshots, and independent backends keyed by physical profile plus optional stable network proxy name. `vpn-runtime` owns VPN gateways, OpenVPN, SOCKS5, tunnel lifecycle, and fail-closed egress. This runtime package builds logical browser routes, exact configured proxy lookup and leases around platform-provided URLs, but it must not select a proxy or start or configure either runtime.
+`workflow-container-agent-tools` owns authoring guidance and audits. `browser-runtime` owns browser processes, physical profile directories, copying, reset, snapshots, and independent backends keyed by physical profile plus optional stable network proxy name. `vpn-runtime` owns VPN gateways, OpenVPN, SOCKS5, tunnel lifecycle, and fail-closed egress. This runtime package builds logical browser routes, exact configured proxy lookup and leases around platform-provided URLs, but it must not select a proxy or start or configure either runtime.
 
 ## Platform Adapter Boundary
 `WorkflowPlatformRuntimeConfig` is the single environment adapter for `WorkflowSourceInterface` major 2. It loads the exact immutable `WorkflowRunContext` from `WORKFLOW_RUN_CONTEXT_PATH`, verifies its run identity against `WORKFLOW_RUN_ID`, and exposes the provenance model instead of duplicating its fields in package-local config.

@@ -1,4 +1,5 @@
 .pytest_cache/
+.spec/
 __pycache__/
 *.egg-info/
 build/
